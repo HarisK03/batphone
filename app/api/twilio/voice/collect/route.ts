@@ -42,14 +42,36 @@ function escapeForSay(value: string) {
     .trim();
 }
 
+function toT9Digits(value: string) {
+  const map: Record<string, string> = {
+    a: "2", b: "2", c: "2",
+    d: "3", e: "3", f: "3",
+    g: "4", h: "4", i: "4",
+    j: "5", k: "5", l: "5",
+    m: "6", n: "6", o: "6",
+    p: "7", q: "7", r: "7", s: "7",
+    t: "8", u: "8", v: "8",
+    w: "9", x: "9", y: "9", z: "9",
+  };
+  return value
+    .toLowerCase()
+    .replace(/[^a-z]/g, "")
+    .split("")
+    .map((ch) => map[ch] ?? "")
+    .join("");
+}
+
 export async function POST(request: Request) {
   const requestUrl = new URL(request.url);
   const retryCount = Number(requestUrl.searchParams.get("retry") ?? "0") || 0;
   const candidatePhonesParam = requestUrl.searchParams.get("candidatePhones") ?? "";
+  const choicePhonesParam = requestUrl.searchParams.get("choicePhones") ?? "";
   const form = await request.formData();
   const callSid = (form.get("CallSid") ?? "").toString();
   const speechResult = (form.get("SpeechResult") ?? "").toString();
   const digits = (form.get("Digits") ?? "").toString();
+  const digitsOnlyInput = digits.replace(/\D/g, "");
+  const isDtmfInput = digitsOnlyInput.length > 0 && !speechResult.trim();
 
   const query = (speechResult || digits).trim();
 
@@ -106,6 +128,74 @@ export async function POST(request: Request) {
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
+  const choicePhones = choicePhonesParam
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const dialContact = async (match: any) => {
+    await supabase
+      .from("calls")
+      .update({
+        contact_name: match.name,
+        destination_phone: match.phone_number,
+        status: "dialing",
+      })
+      .eq("id", call.id);
+
+    const baseUrl = baseUrlFromRequest(request);
+    const recordingCallback = `${baseUrl}/api/twilio/recording`;
+    const statusCallback = `${baseUrl}/api/twilio/call-status`;
+    const callerId = process.env.TWILIO_PHONE_NUMBER || "";
+
+    return xml(
+      [
+        "<Response>",
+        `<Say>Calling ${escapeForSay(String(match.name || ""))}.</Say>`,
+        `<Dial callerId="${callerId}" record="record-from-answer" recordingChannels="dual" recordingStatusCallback="${recordingCallback}" recordingStatusCallbackMethod="POST" action="${statusCallback}" method="POST">`,
+        `<Number>${match.phone_number}</Number>`,
+        "</Dial>",
+        "</Response>",
+      ].join(""),
+    );
+  };
+
+  // DTMF disambiguation menu: "Press 1 for ..., 2 for ..., 3 for ..."
+  if (choicePhones.length > 0) {
+    const choiceSet = new Set(choicePhones.map(String));
+    const choiceMatches = contactRows.filter((c: any) =>
+      choiceSet.has(String(c.phone_number)),
+    );
+
+    const selected = Number(digitsOnlyInput);
+    if (Number.isInteger(selected) && selected >= 1 && selected <= choiceMatches.length) {
+      return dialContact(choiceMatches[selected - 1]);
+    }
+
+    if (retryCount < MAX_GATHER_RETRIES && choiceMatches.length > 0) {
+      const baseUrl = baseUrlFromRequest(request);
+      const retryAction = `${baseUrl}/api/twilio/voice/collect?retry=${
+        retryCount + 1
+      }&choicePhones=${encodeURIComponent(choicePhonesParam)}`;
+      const prompts = choiceMatches
+        .slice(0, 3)
+        .map(
+          (c: any, i: number) => `Press ${i + 1} for ${escapeForSay(String(c.name || ""))}.`,
+        )
+        .join(" ");
+      return xml(
+        [
+          "<Response>",
+          `<Gather input="dtmf" numDigits="1" timeout="5" actionOnEmptyResult="true" action="${retryAction}" method="POST">`,
+          `<Say>I found multiple matches. ${prompts}</Say>`,
+          "</Gather>",
+          "<Say>Sorry, I couldn't identify a single contact. Ending the call now. Goodbye.</Say>",
+          "<Hangup/>",
+          "</Response>",
+        ].join(""),
+      );
+    }
+  }
 
   // If we were given a shortlist of candidate phone numbers (from a previous
   // ambiguous match), disambiguate using the last-4 digits.
@@ -124,31 +214,7 @@ export async function POST(request: Request) {
       );
 
       if (last4Matches.length === 1) {
-        const match = last4Matches[0];
-        await supabase
-          .from("calls")
-          .update({
-            contact_name: match.name,
-            destination_phone: match.phone_number,
-            status: "dialing",
-          })
-          .eq("id", call.id);
-
-        const baseUrl = baseUrlFromRequest(request);
-        const recordingCallback = `${baseUrl}/api/twilio/recording`;
-        const statusCallback = `${baseUrl}/api/twilio/call-status`;
-        const callerId = process.env.TWILIO_PHONE_NUMBER || "";
-
-        const twiml = [
-          "<Response>",
-          `<Say>Calling ${escapeForSay(String(match.name || ""))}.</Say>`,
-          `<Dial callerId="${callerId}" record="record-from-answer" recordingChannels="dual" recordingStatusCallback="${recordingCallback}" recordingStatusCallbackMethod="POST" action="${statusCallback}" method="POST">`,
-          `<Number>${match.phone_number}</Number>`,
-          "</Dial>",
-          "</Response>",
-        ].join("");
-
-        return xml(twiml);
+        return dialContact(last4Matches[0]);
       }
 
       if (last4Matches.length > 1 && retryCount < MAX_GATHER_RETRIES) {
@@ -171,31 +237,7 @@ export async function POST(request: Request) {
       }
       // If we still can't disambiguate, fall back to the first match.
       if (last4Matches.length > 0) {
-        const match = last4Matches[0];
-        await supabase
-          .from("calls")
-          .update({
-            contact_name: match.name,
-            destination_phone: match.phone_number,
-            status: "dialing",
-          })
-          .eq("id", call.id);
-
-        const baseUrl = baseUrlFromRequest(request);
-        const recordingCallback = `${baseUrl}/api/twilio/recording`;
-        const statusCallback = `${baseUrl}/api/twilio/call-status`;
-        const callerId = process.env.TWILIO_PHONE_NUMBER || "";
-
-        const twiml = [
-          "<Response>",
-          `<Say>Calling ${escapeForSay(String(match.name || ""))}.</Say>`,
-          `<Dial callerId="${callerId}" record="record-from-answer" recordingChannels="dual" recordingStatusCallback="${recordingCallback}" recordingStatusCallbackMethod="POST" action="${statusCallback}" method="POST">`,
-          `<Number>${match.phone_number}</Number>`,
-          "</Dial>",
-          "</Response>",
-        ].join("");
-
-        return xml(twiml);
+        return dialContact(last4Matches[0]);
       }
     }
 
@@ -228,30 +270,46 @@ export async function POST(request: Request) {
     // If we have candidates, just pick the first one.
     const match = mergedCandidates[0];
     if (match) {
-      await supabase
-        .from("calls")
-        .update({
-          contact_name: match.name,
-          destination_phone: match.phone_number,
-          status: "dialing",
-        })
-        .eq("id", call.id);
+      return dialContact(match);
+    }
+  }
 
+  // Initial DTMF/T9 flow:
+  // user enters keypad digits, we map contact names to T9 and match prefixes.
+  if (isDtmfInput) {
+    const t9Matches = contactRows.filter((c: any) =>
+      toT9Digits(String(c.name ?? "")).startsWith(digitsOnlyInput),
+    );
+
+    if (t9Matches.length === 1) {
+      return dialContact(t9Matches[0]);
+    }
+
+    if (t9Matches.length > 1 && retryCount < MAX_GATHER_RETRIES) {
+      const top = t9Matches.slice(0, 3);
       const baseUrl = baseUrlFromRequest(request);
-      const recordingCallback = `${baseUrl}/api/twilio/recording`;
-      const statusCallback = `${baseUrl}/api/twilio/call-status`;
-      const callerId = process.env.TWILIO_PHONE_NUMBER || "";
+      const retryAction = `${baseUrl}/api/twilio/voice/collect?retry=${
+        retryCount + 1
+      }&choicePhones=${encodeURIComponent(
+        top.map((c: any) => String(c.phone_number)).join(","),
+      )}`;
+      const prompts = top
+        .map(
+          (c: any, i: number) => `Press ${i + 1} for ${escapeForSay(String(c.name || ""))}.`,
+        )
+        .join(" ");
 
-      const twiml = [
-        "<Response>",
-        `<Say>Calling ${escapeForSay(String(match.name || ""))}.</Say>`,
-        `<Dial callerId="${callerId}" record="record-from-answer" recordingChannels="dual" recordingStatusCallback="${recordingCallback}" recordingStatusCallbackMethod="POST" action="${statusCallback}" method="POST">`,
-        `<Number>${match.phone_number}</Number>`,
-        "</Dial>",
-        "</Response>",
-      ].join("");
-
-      return xml(twiml);
+      return xml(
+        [
+          "<Response>",
+          `<Gather input="dtmf" numDigits="1" timeout="5" actionOnEmptyResult="true" action="${retryAction}" method="POST">`,
+          `<Say>I found multiple matches for ${digitsOnlyInput}. ${prompts}</Say>`,
+          "</Gather>",
+          "<Say>Sorry, I couldn't identify a single contact. Ending the call now. Goodbye.</Say>",
+          "<Hangup/>",
+          "</Response>",
+        ].join(""),
+      );
     }
   }
 
@@ -336,29 +394,6 @@ export async function POST(request: Request) {
     );
   }
 
-  await supabase
-    .from("calls")
-    .update({
-      contact_name: match.name,
-      destination_phone: match.phone_number,
-      status: "dialing",
-    })
-    .eq("id", call.id);
-
-  const baseUrl = baseUrlFromRequest(request);
-  const recordingCallback = `${baseUrl}/api/twilio/recording`;
-  const statusCallback = `${baseUrl}/api/twilio/call-status`;
-  const callerId = process.env.TWILIO_PHONE_NUMBER || "";
-
-  const twiml = [
-    "<Response>",
-    `<Say>Calling ${match.name}.</Say>`,
-    `<Dial callerId="${callerId}" record="record-from-answer" recordingChannels="dual" recordingStatusCallback="${recordingCallback}" recordingStatusCallbackMethod="POST" action="${statusCallback}" method="POST">`,
-    `<Number>${match.phone_number}</Number>`,
-    "</Dial>",
-    "</Response>",
-  ].join("");
-
-  return xml(twiml);
+  return dialContact(match);
 }
 
