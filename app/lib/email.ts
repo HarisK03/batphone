@@ -1,25 +1,26 @@
-import { Resend } from "resend";
+import sendgridMail from "@sendgrid/mail";
 
-const resend = new Resend(process.env.RESEND_API_KEY || "");
+const sendgridApiKey = process.env.SENDGRID_API_KEY || "";
 const fromAddress = process.env.EMAIL_FROM || "no-reply@example.com";
 
 type EmailPayload = {
-  to: string;
-  subject: string;
-  text: string;
+	to: string;
+	subject: string;
+	text: string;
 };
 
 export async function sendEmail(payload: EmailPayload) {
-  if (!process.env.RESEND_API_KEY) {
-    console.warn("RESEND_API_KEY not set; skipping email send.");
-    return;
-  }
+	if (!sendgridApiKey) {
+    // Throw so the Deepgram webhook can mark `transcript_error` and show it to the user.
+    throw new Error("SENDGRID_API_KEY not set");
+	}
 
-  await resend.emails.send({
-    from: fromAddress,
-    to: payload.to,
-    subject: payload.subject,
-    text: payload.text,
-  });
+	sendgridMail.setApiKey(sendgridApiKey);
+	await sendgridMail.send({
+		from: fromAddress,
+		to: payload.to,
+		subject: payload.subject,
+		text: payload.text,
+		html: `<pre style="font-family: sans-serif; font-size: 14px; white-space: pre-wrap; line-height: 1.5;">${payload.text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</pre>`,
+	});
 }
-

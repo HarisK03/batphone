@@ -3,6 +3,12 @@ import { ensureUserFromRequest } from "@/app/lib/auth-request";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+function formatPhoneForUi(phone: string | null) {
+  const v = (phone ?? "").toString().trim();
+  if (!v) return null;
+  return v.startsWith("+") ? v : `+${v}`;
+}
+
 export async function GET(
   req: Request,
   ctx: RouteContext<"/api/calls/[id]">,
@@ -31,7 +37,7 @@ export async function GET(
   const call = {
     id: d.id as string,
     contactName: (d.contact_name as string | null) ?? null,
-    destinationPhone: (d.destination_phone as string | null) ?? null,
+    destinationPhone: formatPhoneForUi(d.destination_phone as string | null),
     startedAt: (d.started_at as string | null) ?? null,
     durationSeconds: (d.duration_seconds as number | null) ?? null,
     transcriptStatus: (d.transcript_status as string) ?? "pending",

@@ -17,8 +17,8 @@ It is designed to run cleanly in **GitHub Codespaces**.
 - **Auth**: Supabase Auth with Google OAuth
 - **DB**: Prisma + Supabase Postgres
 - **Telephony**: Twilio Programmable Voice (webhooks + TwiML)
-- **Transcription**: Groq Whisper (HTTP API)
-- **Email**: Resend
+- **Transcription**: Deepgram (multichannel + diarized STT)
+- **Email**: SendGrid
 
 ## Setup
 
@@ -46,11 +46,11 @@ Copy `.env` and fill in:
   - `TWILIO_ACCOUNT_SID`
   - `TWILIO_AUTH_TOKEN`
   - `TWILIO_PHONE_NUMBER` – the purchased bat phone number
-- **Resend**
-  - `RESEND_API_KEY`
+- **SendGrid**
+  - `SENDGRID_API_KEY`
   - `EMAIL_FROM` – verified sender address
-- **Groq Whisper**
-  - `GROQ_API_KEY`
+- **Deepgram**
+  - `DEEPGRAM_API_KEY` – from [Deepgram dashboard](https://console.deepgram.com/)
 
 ### 3. Database (Supabase tables)
 
@@ -152,7 +152,7 @@ The app will:
    - Twilio calls the contact from the bat number, recording automatically.
 6. **Transcription + email**
    - After the recording callback fires:
-     - The app sends audio to Groq Whisper
+    - The app downloads the **dual-channel** Twilio recording (caller vs contact on separate channels), transcribes it with **Deepgram multichannel**, then stores the labeled transcript and emails you (labels use your name/email and the contact name)
      - On completion, it stores the transcript and emails you:
        - Call metadata
        - Transcript text
@@ -166,7 +166,7 @@ The app will:
 - **Unknown caller number**: Twilio webhook returns a polite message explaining the number isn’t registered; user should log in and set their phone number.
 - **Contact not found**: Caller is informed that the contact name wasn’t found and to add the contact in the app.
 - **Transcription failures**: `Call.transcriptStatus` is set to `"failed"` with an error message; transcript page shows the failure.
-- **Email delivery issues**: If `RESEND_API_KEY` is not set or Resend fails, the server logs a warning but does not break the main call flow.
+- **Email delivery issues**: If `SENDGRID_API_KEY` is not set or SendGrid fails, the server logs a warning but does not break the main call flow.
 
 ## Notes for the interview demo
 

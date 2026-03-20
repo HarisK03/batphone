@@ -45,15 +45,44 @@ export async function ensureUserFromRequest(request: Request) {
     sbUser.name ||
     undefined;
 
+  const upsertPayload: {
+    id: string;
+    email: string;
+    name?: string | null;
+  } = {
+    id: sbUser.id,
+    email: sbUser.email ?? "",
+  };
+
+  // Important: don't overwrite a user-edited `users.name` on every request.
+  // We only backfill `name` from OAuth when the DB value is currently empty.
+  try {
+    const { data: existing, error: existingError } = await service
+      .from("users")
+      .select("name")
+      .eq("id", sbUser.id)
+      .maybeSingle();
+
+    const existingName = existing?.name;
+    const shouldBackfillName = Boolean(fullName) && (!existingName || existingName === "");
+
+    if (shouldBackfillName) {
+      upsertPayload.name = fullName!;
+    }
+
+    if (existingError) {
+      // If we can't read current state, fall back to previous behavior of not overwriting.
+      // (We still upsert id/email so the UI can proceed.)
+      void existingError;
+    }
+  } catch {
+    // If the read fails, avoid overwriting name.
+  }
+
   const { error } = await service
     .from("users")
     .upsert(
-      {
-        id: sbUser.id,
-        email: sbUser.email ?? "",
-        name: fullName ?? null,
-        phone_number: null,
-      },
+      upsertPayload,
       { onConflict: "id" },
     );
 

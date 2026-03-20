@@ -1,7 +1,7 @@
-import type { NextConfig } from "next";
-
-const nextConfig: NextConfig = {
-  /* config options here */
+const nextConfig = {
+	allowedDevOrigins: [
+		"unconsulted-proindustrialization-sharonda.ngrok-free.dev",
+	],
 };
 
 export default nextConfig;

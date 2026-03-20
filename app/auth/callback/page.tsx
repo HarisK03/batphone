@@ -10,6 +10,10 @@ export default function AuthCallbackPage() {
 	useEffect(() => {
 		let cancelled = false;
 
+		function safeReplace(path: string) {
+			if (!cancelled) router.replace(path);
+		}
+
 		async function run() {
 			const supabase = getSupabaseClient();
 
@@ -20,14 +24,14 @@ export default function AuthCallbackPage() {
 			const code = params.get("code");
 
 			if (!code) {
-				router.replace("/");
+				safeReplace("/");
 				return;
 			}
 
 			const { error } = await supabase.auth.exchangeCodeForSession(code);
 			if (error) {
 				console.error("Supabase OAuth exchange failed:", error);
-				if (!cancelled) router.replace("/");
+				safeReplace("/");
 				return;
 			}
 
@@ -49,7 +53,7 @@ export default function AuthCallbackPage() {
 				}, 3000);
 			});
 
-			if (!cancelled) router.replace("/");
+			safeReplace("/");
 		}
 
 		run();
@@ -60,8 +64,6 @@ export default function AuthCallbackPage() {
 	}, [router]);
 
 	return (
-		<div className="min-h-screen flex items-center justify-center bg-zinc-50 px-4">
-			<p className="text-sm text-black">Signing you in…</p>
-		</div>
+		<div className="fixed inset-0 z-[1000] bg-neutral-950" />
 	);
 }

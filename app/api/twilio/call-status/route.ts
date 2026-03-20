@@ -10,23 +10,29 @@ function xml(body: string) {
 export async function POST(request: Request) {
   const form = await request.formData();
   const callSid = (form.get("CallSid") ?? "").toString();
-  const callStatus = (form.get("CallStatus") ?? "").toString();
-  const durationStr = (form.get("CallDuration") ?? "").toString();
+  const parentCallStatus = (form.get("CallStatus") ?? "").toString();
+  const dialCallStatus = (form.get("DialCallStatus") ?? "").toString();
+  const dialDurationStr = (form.get("DialCallDuration") ?? "").toString();
+  const callDurationStr = (form.get("CallDuration") ?? "").toString();
 
   if (!callSid) {
     return xml("<Response></Response>");
   }
 
+  // For <Dial action>, Twilio provides DialCallStatus/DialCallDuration.
+  // Fall back to parent call fields when dial-specific values are missing.
+  const status = dialCallStatus || parentCallStatus || null;
+  const durationRaw = dialDurationStr || callDurationStr;
   const duration =
-    typeof durationStr === "string" && durationStr
-      ? parseInt(durationStr, 10) || null
+    typeof durationRaw === "string" && durationRaw
+      ? parseInt(durationRaw, 10) || null
       : null;
 
   const supabase = getSupabaseServiceClient();
   await supabase
     .from("calls")
     .update({
-      status: callStatus || null,
+      status,
       duration_seconds: duration,
       ended_at: new Date().toISOString(),
     })
