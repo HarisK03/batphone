@@ -11,6 +11,10 @@ This is a mobile-first **Next.js 16 app router** project that implements an inte
 
 It is designed to run cleanly in **GitHub Codespaces**.
 
+## Documentation
+
+- [Architecture Overview](./ARCHITECTURE.md)
+
 ## Stack
 
 - **Frontend**: Next.js 16 (app router), React, Tailwind-style utility classes
