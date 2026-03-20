@@ -15,6 +15,10 @@ It is designed to run cleanly in **GitHub Codespaces**.
 
 - [Architecture Overview](./ARCHITECTURE.md)
 
+## Demo Video
+
+- [Watch the demo on YouTube](https://www.youtube.com/watch?v=WozyChi7ZU4)
+
 ## Stack
 
 - **Frontend**: Next.js 16 (app router), React, Tailwind-style utility classes
