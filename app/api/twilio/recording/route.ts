@@ -1,5 +1,6 @@
 import { getSupabaseServiceClient } from "@/app/lib/supabase-service";
 import { transcribeAndEmailForCall } from "@/app/lib/transcription";
+import { after } from "next/server";
 
 function baseUrlFromRequest(request: Request) {
 	const forwardedProto = request.headers.get("x-forwarded-proto");
@@ -36,7 +37,10 @@ export async function POST(request: Request) {
 		.update({
 			recording_sid: recordingSid,
 			recording_url: recordingUrl,
-			transcript_status: "pending",
+			// Move to processing as soon as recording callback arrives so calls
+			// don't look stuck at pending if background processing fails early.
+			transcript_status: "processing",
+			transcript_error: null,
 		})
 		.eq("twilio_call_sid", callSid);
 
@@ -49,7 +53,25 @@ export async function POST(request: Request) {
 
 		if (call?.id) {
 			const appBaseUrl = baseUrlFromRequest(request);
-			void transcribeAndEmailForCall(call.id as string, appBaseUrl);
+			const callId = String(call.id);
+			after(async () => {
+				try {
+					await transcribeAndEmailForCall(callId, appBaseUrl);
+				} catch (error) {
+					// Avoid leaving calls stuck in "pending" if background work crashes.
+					const message = error instanceof Error ? error.message : String(error);
+					await supabase
+						.from("calls")
+						.update({
+							transcript_status: "failed",
+							transcript_error: `Transcription pipeline failed: ${message}`.slice(
+								0,
+								900,
+							),
+						})
+						.eq("id", callId);
+				}
+			});
 		}
 	}
 

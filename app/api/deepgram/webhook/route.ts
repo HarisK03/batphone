@@ -57,8 +57,12 @@ export async function POST(request: Request) {
 	const body = (await request.json().catch(() => null)) as DeepgramWebhookBody | null;
 	if (!body) return new Response("ok", { status: 200 });
 
-	const callId = extractCallId(body);
-	if (!callId) return new Response("ok", { status: 200 });
+	const callbackCallId = new URL(request.url).searchParams.get("callId");
+	const callId = callbackCallId?.trim() || extractCallId(body);
+	if (!callId) {
+		console.warn("[deepgram/webhook] Missing callId in callback payload/query");
+		return new Response("ok", { status: 200 });
+	}
 
 	try {
 		const supabase = getSupabaseServiceClient();

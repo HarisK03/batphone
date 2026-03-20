@@ -24,56 +24,78 @@ function xml(body: string) {
 }
 
 export async function POST(request: Request) {
-  const form = await request.formData();
-  const from = (form.get("From") ?? "").toString();
-  const normalizedFrom = normalizePhoneNumber(from);
-  const callSid = (form.get("CallSid") ?? "").toString();
+  try {
+    const form = await request.formData();
+    const from = (form.get("From") ?? "").toString();
+    const normalizedFrom = normalizePhoneNumber(from);
+    const callSid = (form.get("CallSid") ?? "").toString();
 
-  if (!normalizedFrom || !callSid) {
-    return xml(`<Response><Say>Invalid call.</Say></Response>`);
-  }
+    if (!normalizedFrom || !callSid) {
+      return xml(`<Response><Say>Invalid call.</Say></Response>`);
+    }
 
-  const supabase = getSupabaseServiceClient();
-  const { data: user, error } = await supabase
-    .from("users")
-    .select("id,name")
-    .eq("phone_number", normalizedFrom)
-    .maybeSingle();
+    const supabase = getSupabaseServiceClient();
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("id,name")
+      .eq("phone_number", normalizedFrom)
+      .maybeSingle();
 
-  if (error) {
-    return xml(`<Response><Say>Server error. Goodbye.</Say></Response>`);
-  }
+    if (error) {
+      console.error("[twilio/voice] users lookup failed", {
+        callSid,
+        normalizedFrom,
+        error,
+      });
+      return xml(`<Response><Say>Server error. Goodbye.</Say></Response>`);
+    }
 
-  if (!user) {
+    if (!user) {
+      return xml(
+        `<Response><Say>Sorry, this number is not registered with the bat phone. Please configure your phone number in the web app.</Say><Hangup/></Response>`,
+      );
+    }
+
+    const { error: upsertError } = await supabase
+      .from("calls")
+      .upsert(
+        {
+          user_id: user.id,
+          twilio_call_sid: callSid,
+          started_at: new Date().toISOString(),
+          status: "inbound",
+        },
+        { onConflict: "twilio_call_sid" },
+      );
+
+    if (upsertError) {
+      console.error("[twilio/voice] calls upsert failed", {
+        callSid,
+        userId: user.id,
+        error: upsertError,
+      });
+      return xml(`<Response><Say>Server error. Goodbye.</Say></Response>`);
+    }
+
+    const actionUrl = `${baseUrlFromRequest(request)}/api/twilio/voice/collect?retry=0`;
+
+    const twiml = [
+      "<Response>",
+      `<Gather input="speech dtmf" timeout="5" actionOnEmptyResult="true" action="${actionUrl}" method="POST">`,
+      `<Say>Hi${user.name ? " " + user.name : ""}. Who would you like to call?</Say>`,
+      "</Gather>",
+      `<Say>Sorry, I couldn't understand. Please try again.</Say>`,
+      "<Hangup/>",
+      "</Response>",
+    ].join("");
+
+    return xml(twiml);
+  } catch (error) {
+    console.error("[twilio/voice] unhandled error", error);
+    // Always return TwiML so Twilio doesn't play generic application error.
     return xml(
-      `<Response><Say>Sorry, this number is not registered with the bat phone. Please configure your phone number in the web app.</Say><Hangup/></Response>`,
+      "<Response><Say>Sorry, we hit a server issue. Please try again later.</Say><Hangup/></Response>",
     );
   }
-
-  await supabase
-    .from("calls")
-    .upsert(
-      {
-        user_id: user.id,
-        twilio_call_sid: callSid,
-        started_at: new Date().toISOString(),
-        status: "inbound",
-      },
-      { onConflict: "twilio_call_sid" },
-    );
-
-  const actionUrl = `${baseUrlFromRequest(request)}/api/twilio/voice/collect?retry=0`;
-
-  const twiml = [
-    "<Response>",
-    `<Gather input="speech dtmf" timeout="5" actionOnEmptyResult="true" action="${actionUrl}" method="POST">`,
-    `<Say>Hi${user.name ? " " + user.name : ""}. Who would you like to call?</Say>`,
-    "</Gather>",
-    `<Say>Sorry, I couldn't understand. Please try again.</Say>`,
-    "<Hangup/>",
-    "</Response>",
-  ].join("");
-
-  return xml(twiml);
 }
 

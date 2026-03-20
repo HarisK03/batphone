@@ -257,7 +257,9 @@ export async function transcribeAndEmailForCall(
 	url.searchParams.set("punctuate", "true");
 	url.searchParams.set("language", "en");
 
-	const callbackUrl = `${appBaseUrl}/api/deepgram/webhook`;
+	const callbackUrl = `${appBaseUrl}/api/deepgram/webhook?callId=${encodeURIComponent(
+		callId,
+	)}`;
 	url.searchParams.set("callback", callbackUrl);
 	url.searchParams.set("callback_method", "post");
 	// Deepgram will echo this back in metadata.tags so the webhook knows the call.
