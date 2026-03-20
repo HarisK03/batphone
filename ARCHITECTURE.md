@@ -73,13 +73,10 @@ Design choice: explicit call-state columns (`status`, `transcript_status`, `tran
   - Easy observability through call row status/error fields
 - Cons
   - Tight coupling of web app and telephony webhooks
-  - No separate queue/worker boundary for heavy async tasks
-  - Some webhook paths rely on in-process async execution rather than durable job orchestration
+  - Some webhook paths rely on in-process async execution
 
 ## How the system could scale
-- Introduce queue + workers (e.g., Redis/SQS + worker service) for transcription/email jobs
-- Separate webhook ingress from processing service
-- Add idempotency keys and replay-safe handlers for all webhook endpoints
+- Introduce queue + workers (e.g., Redis cache) for transcription/email jobs
 - Add structured logging + tracing (per call SID/call ID correlation)
 - Add caching/index strategy for large contact sets and advanced search
 - Partition/archival strategy for growing `calls` data
@@ -91,6 +88,5 @@ Design choice: explicit call-state columns (`status`, `transcript_status`, `tran
 - Contact matching is heuristic and can still be ambiguous
 - No robust background job infrastructure (retries/backoff/dead-letter queues)
 - Operational dashboards/alerting are minimal
-- Security hardening is basic (good for PoC, not full production posture)
 - External provider dependencies (Twilio/Deepgram/SendGrid) can affect end-to-end latency and reliability
 
