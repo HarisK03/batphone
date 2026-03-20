@@ -15,7 +15,7 @@ It is designed to run cleanly in **GitHub Codespaces**.
 
 - **Frontend**: Next.js 16 (app router), React, Tailwind-style utility classes
 - **Auth**: Supabase Auth with Google OAuth
-- **DB**: Prisma + Supabase Postgres
+- **DB**: Supabase Postgres
 - **Telephony**: Twilio Programmable Voice (webhooks + TwiML)
 - **Transcription**: Deepgram (multichannel + diarized STT)
 - **Email**: SendGrid
@@ -30,7 +30,11 @@ npm install
 
 ### 2. Environment variables
 
-Copy `.env` and fill in:
+Copy `.env.example` to `.env` and fill in values:
+
+```bash
+cp .env.example .env
+```
 
 - **Google OAuth**
   - `GOOGLE_CLIENT_ID`
@@ -52,7 +56,15 @@ Copy `.env` and fill in:
 - **Deepgram**
   - `DEEPGRAM_API_KEY` – from [Deepgram dashboard](https://console.deepgram.com/)
 
-### 3. Database (Supabase tables)
+### 3. API key / provider setup checklist
+
+- **Supabase**: create project, enable Google provider, collect URL + anon key + service role key.
+- **Google OAuth**: add your app callback URL in Google console.
+- **Twilio**: buy/choose number, set voice webhook to `POST {AUTH_URL}/api/twilio/voice`.
+- **Deepgram**: create API key with listen permissions.
+- **SendGrid**: create API key + verify `EMAIL_FROM` sender.
+
+### 4. Database (Supabase tables)
 
 This PoC uses Supabase Postgres tables directly (no Prisma).
 
@@ -110,13 +122,22 @@ create index if not exists calls_created_at_idx on public.calls(created_at);
 create index if not exists contacts_user_id_idx on public.contacts(user_id);
 ```
 
-### 4. Run the app (local or Codespaces)
+### 5. Run the app (local or Codespaces)
 
 ```bash
 npm run dev
 ```
 
 Open the URL shown in the terminal (or the forwarded port in Codespaces).
+
+## GitHub Codespaces
+
+This project runs in Codespaces as long as:
+
+1. You set `AUTH_URL` to your forwarded Codespaces URL (https).
+2. You add that URL to OAuth provider callback settings.
+3. You expose port `3000` publicly (for Twilio webhooks).
+4. If needed, set `ALLOWED_DEV_ORIGINS` in `.env` with your Codespaces host.
 
 ## Twilio configuration
 
@@ -166,7 +187,7 @@ The app will:
 - **Unknown caller number**: Twilio webhook returns a polite message explaining the number isn’t registered; user should log in and set their phone number.
 - **Contact not found**: Caller is informed that the contact name wasn’t found and to add the contact in the app.
 - **Transcription failures**: `Call.transcriptStatus` is set to `"failed"` with an error message; transcript page shows the failure.
-- **Email delivery issues**: If `SENDGRID_API_KEY` is not set or SendGrid fails, the server logs a warning but does not break the main call flow.
+- **Email delivery issues**: if SendGrid config is missing or sending fails, the call stores `transcript_error` and the UI shows “Email not delivered”.
 
 ## Notes for the interview demo
 
