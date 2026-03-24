@@ -22,6 +22,26 @@ type TranscriptErrorView = {
   description: string;
 };
 
+function renderTranscriptWithBoldSpeakers(transcriptText: string) {
+  return transcriptText.split("\n").map((line, index) => {
+    const match = line.match(/^([^:]+):\s*(.*)$/);
+    if (!match) {
+      return (
+        <p key={index} className="whitespace-pre-wrap">
+          {line}
+        </p>
+      );
+    }
+
+    return (
+      <p key={index} className="whitespace-pre-wrap">
+        <span className="font-semibold">{match[1]}:</span>{" "}
+        <span>{match[2]}</span>
+      </p>
+    );
+  });
+}
+
 function classifyTranscriptError(transcriptError: string): TranscriptErrorView {
   const err = transcriptError.trim();
   const lower = err.toLowerCase();
@@ -214,9 +234,11 @@ export default function CallPage() {
 									{copied ? "Copied" : "Copy"}
 								</button>
 							</div>
-							<pre className="whitespace-pre-wrap text-sm text-neutral-100 bg-neutral-950/30 rounded-xl border border-neutral-800/60 p-3">
-								{call.transcriptText}
-							</pre>
+							<div className="text-sm text-neutral-100 bg-neutral-950/30 rounded-xl border border-neutral-800/60 p-3 space-y-1">
+								{renderTranscriptWithBoldSpeakers(
+									call.transcriptText ?? "",
+								)}
+							</div>
 
 							{transcriptErrorView?.kind === "email" && transcriptError ? (
 								<div className="rounded-xl border border-red-500/20 bg-red-500/5 p-3 space-y-2">

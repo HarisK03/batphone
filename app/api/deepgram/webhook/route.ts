@@ -21,6 +21,25 @@ type DeepgramWebhookBody = {
 	};
 };
 
+function escapeHtml(value: string) {
+	return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function transcriptToHtml(transcriptText: string) {
+	const lines = transcriptText.split("\n");
+	return lines
+		.map((line) => {
+			const trimmed = line.trim();
+			if (!trimmed) return "<br/>";
+			const match = trimmed.match(/^([^:]+):\s*(.*)$/);
+			if (!match) return escapeHtml(trimmed);
+			const speaker = escapeHtml(match[1].trim());
+			const content = escapeHtml(match[2].trim());
+			return `<strong>${speaker}:</strong> ${content}`;
+		})
+		.join("<br/>");
+}
+
 function baseUrlFromRequest(request: Request) {
 	const forwardedProto = request.headers.get("x-forwarded-proto");
 	const forwardedHost = request.headers.get("x-forwarded-host");
@@ -79,7 +98,7 @@ export async function POST(request: Request) {
 
 		const { data: user } = await supabase
 			.from("users")
-			.select("email,name")
+			.select("email,name,phone_number")
 			.eq("id", call.user_id)
 			.maybeSingle();
 
@@ -155,13 +174,18 @@ export async function POST(request: Request) {
 			.eq("id", callId);
 
 		const appUrl = baseUrlFromRequest(request);
+		const callerDisplay =
+			(user.phone_number as string | null) ??
+			(user.name as string | null) ??
+			(user.email as string | null) ??
+			"Unknown";
+		const calledDisplay = (call.destination_phone as string | null) ?? "Unknown";
 
 		const emailText = [
 			"Call Transcript",
 			"",
-			`Caller: ${user.name ?? user.email}`,
-			`Destination: ${(call.destination_phone as string | null) ?? "Unknown"}`,
-			`Phone Number: ${(call.destination_phone as string | null) ?? "Unknown"}`,
+			`Caller Number: ${callerDisplay}`,
+			`Called Number: ${calledDisplay}`,
 			`Call Start Time: ${
 				call.started_at
 					? new Date(call.started_at as string).toISOString()
@@ -183,11 +207,47 @@ export async function POST(request: Request) {
 				: ["View in Bat Phone: unavailable", "Recording: unavailable"]),
 		].join("\n");
 
+		const viewUrl = appUrl ? `${appUrl}/calls/${call.id}` : "";
+		const recordingUrl = appUrl
+			? `${appUrl}/api/twilio/recording/download?recordingUrl=${encodeURIComponent(
+					String(call.recording_url ?? ""),
+				)}`
+			: "";
+		const emailHtml = `
+			<div style="font-family: sans-serif; font-size: 14px; line-height: 1.5;">
+				<h2 style="margin: 0 0 12px;">Call Transcript</h2>
+				<p style="margin: 0 0 4px;"><strong>Caller Number:</strong> ${escapeHtml(callerDisplay)}</p>
+				<p style="margin: 0 0 4px;"><strong>Called Number:</strong> ${escapeHtml(calledDisplay)}</p>
+				<p style="margin: 0 0 4px;"><strong>Call Start Time:</strong> ${
+					call.started_at
+						? escapeHtml(new Date(call.started_at as string).toISOString())
+						: "Unknown"
+				}</p>
+				<p style="margin: 0 0 12px;"><strong>Call Duration:</strong> ${
+					call.duration_seconds != null
+						? `${call.duration_seconds}s`
+						: "Unknown"
+				}</p>
+				<div style="white-space: normal; margin: 0 0 12px;">
+					${transcriptToHtml(transcriptText)}
+				</div>
+				<p style="margin: 0 0 4px;"><strong>View in Bat Phone:</strong> ${
+					viewUrl ? `<a href="${escapeHtml(viewUrl)}">${escapeHtml(viewUrl)}</a>` : "unavailable"
+				}</p>
+				<p style="margin: 0;"><strong>Recording:</strong> ${
+					recordingUrl
+						? `<a href="${escapeHtml(recordingUrl)}">${escapeHtml(recordingUrl)}</a>`
+						: "unavailable"
+				}</p>
+			</div>
+		`;
+
 		try {
 			await sendEmail({
 				to: user.email,
 				subject: "Your Bat Phone call transcript",
 				text: emailText,
+				html: emailHtml,
 			});
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);

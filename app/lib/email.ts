@@ -7,6 +7,7 @@ type EmailPayload = {
 	to: string;
 	subject: string;
 	text: string;
+	html?: string;
 };
 
 export async function sendEmail(payload: EmailPayload) {
@@ -21,6 +22,8 @@ export async function sendEmail(payload: EmailPayload) {
 		to: payload.to,
 		subject: payload.subject,
 		text: payload.text,
-		html: `<pre style="font-family: sans-serif; font-size: 14px; white-space: pre-wrap; line-height: 1.5;">${payload.text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</pre>`,
+		html:
+			payload.html ??
+			`<pre style="font-family: sans-serif; font-size: 14px; white-space: pre-wrap; line-height: 1.5;">${payload.text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</pre>`,
 	});
 }
