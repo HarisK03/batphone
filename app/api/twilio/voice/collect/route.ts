@@ -9,74 +9,102 @@ function xml(body: string) {
 	});
 }
 
+function baseUrlFromRequest(request: Request) {
+	const forwardedProto = request.headers.get("x-forwarded-proto");
+	const forwardedHost = request.headers.get("x-forwarded-host");
+	const host = forwardedHost || request.headers.get("host");
+
+	if (host) {
+		const proto =
+			forwardedProto || (host.includes("localhost") ? "http" : "https");
+		return `${proto}://${host}`;
+	}
+
+	return process.env.AUTH_URL || "";
+}
+
 function normalize(text: string) {
 	return text
 		.toLowerCase()
-		.replace(/[^a-z0-9\s]/g, "")
+		.replace(/[^a-z0-9\s]/g, " ")
+		.replace(/\s+/g, " ")
 		.trim();
 }
 
 function escape(text: string) {
-	return text.replace(/[<>&'"]/g, " ");
+	return text.replace(/[<>&'"]/g, " ").trim();
 }
 
-function baseUrlFromRequest(request: Request) {
-	const host = request.headers.get("host");
-	const proto = host?.includes("localhost") ? "http" : "https";
-	return `${proto}://${host}`;
+// 🔥 Better matching (supports multi-word names)
+function matchesName(contactName: string, query: string) {
+	const nameTokens = normalize(contactName).split(" ");
+	const queryTokens = normalize(query).split(" ");
+
+	return queryTokens.every((q) => nameTokens.some((n) => n.startsWith(q)));
 }
+
+// speech → number
+const speechMap: Record<string, number> = {
+	one: 1,
+	two: 2,
+	three: 3,
+};
 
 export async function POST(request: Request) {
+	const requestUrl = new URL(request.url);
+	const retryCount = Number(requestUrl.searchParams.get("retry") ?? "0");
+	const choicePhonesParam = requestUrl.searchParams.get("choicePhones") ?? "";
+
 	const form = await request.formData();
 
 	const callSid = (form.get("CallSid") ?? "").toString();
-	const speech = (form.get("SpeechResult") ?? "").toString();
+	const speechResult = (form.get("SpeechResult") ?? "").toString();
 	const digits = (form.get("Digits") ?? "").toString();
 
-	console.log("[COLLECT]", { callSid, speech, digits });
+	console.log("[COLLECT]", { callSid, speechResult, digits, retryCount });
 
-	const query = (speech || digits).trim();
+	const query = (speechResult || digits).trim();
+	const baseUrl = baseUrlFromRequest(request);
 
 	const supabase = getSupabaseServiceClient();
 
+	// get user via callSid → fallback safe
 	const { data: call } = await supabase
 		.from("calls")
-		.select("*")
+		.select("user_id")
 		.eq("twilio_call_sid", callSid)
 		.maybeSingle();
 
 	if (!call) {
-		return xml(`<Response><Say>Call not found.</Say><Hangup/></Response>`);
+		return xml(
+			`<Response><Say>Sorry, something went wrong. Please try again.</Say><Hangup/></Response>`,
+		);
 	}
-
-	const retry = call.retry_count ?? 0;
 
 	const { data: contacts } = await supabase
 		.from("contacts")
-		.select("*")
+		.select("id,name,phone_number")
 		.eq("user_id", call.user_id);
 
-	const contactList = contacts ?? [];
+	const contactRows = contacts ?? [];
 
-	// ─────────────── DISAMBIGUATION MODE ───────────────
-	if (call.choice_phones) {
-		const matches = contactList.filter((c: any) =>
-			call.choice_phones.includes(c.phone_number),
+	// ─────────────── DISAMBIGUATION ───────────────
+	const choicePhones = choicePhonesParam
+		.split(",")
+		.map((s) => s.trim())
+		.filter(Boolean);
+
+	if (choicePhones.length > 0) {
+		const matches = contactRows.filter((c: any) =>
+			choicePhones.includes(String(c.phone_number)),
 		);
 
-		const index = parseInt(digits);
+		const digitIndex = digits ? parseInt(digits) : NaN;
+		const speechIndex = speechMap[normalize(speechResult)];
+		const index = digitIndex || speechIndex;
 
 		if (index >= 1 && index <= matches.length) {
 			const selected = matches[index - 1];
-
-			await supabase
-				.from("calls")
-				.update({
-					contact_name: selected.name,
-					destination_phone: selected.phone_number,
-					status: "dialing",
-				})
-				.eq("id", call.id);
 
 			return xml(`
 <Response>
@@ -86,42 +114,56 @@ export async function POST(request: Request) {
 `);
 		}
 
-		// retry
-		if (retry < 2) {
-			await supabase
-				.from("calls")
-				.update({
-					retry_count: retry + 1,
-				})
-				.eq("id", call.id);
+		// retry menu
+		const menuAction = `${baseUrl}/api/twilio/voice/collect?choicePhones=${encodeURIComponent(choicePhonesParam)}`;
 
-			return buildMenu(matches, request);
+		const options = matches
+			.map((c: any, i: number) => `Press ${i + 1} for ${escape(c.name)}`)
+			.join(". ");
+
+		return xml(`
+<Response>
+	<Gather input="dtmf speech"
+			numDigits="1"
+			timeout="7"
+			action="${menuAction}"
+			method="POST"
+			actionOnEmptyResult="true">
+		<Say>Please choose a valid option. ${options}</Say>
+	</Gather>
+</Response>
+`);
+	}
+
+	// ─────────────── EMPTY INPUT ───────────────
+	if (!query) {
+		if (retryCount < 2) {
+			const retryAction = `${baseUrl}/api/twilio/voice/collect?retry=${retryCount + 1}`;
+
+			return xml(`
+<Response>
+	<Gather input="speech"
+		timeout="5"
+		action="${retryAction}"
+		method="POST"
+		actionOnEmptyResult="true">
+		<Say>I didn’t catch that. Please say the contact name.</Say>
+	</Gather>
+</Response>
+`);
 		}
 
-		// fallback
 		return xml(
-			`<Response><Say>No selection made.</Say><Hangup/></Response>`,
+			`<Response><Say>Sorry, I couldn’t understand. Goodbye.</Say><Hangup/></Response>`,
 		);
 	}
 
-	// ─────────────── SEARCH MODE ───────────────
-	const normalized = normalize(query);
+	// ─────────────── SEARCH ───────────────
+	const matches = contactRows.filter((c: any) => matchesName(c.name, query));
 
-	const matches = contactList.filter((c: any) =>
-		normalize(c.name).includes(normalized),
-	);
-
+	// single match
 	if (matches.length === 1) {
 		const c = matches[0];
-
-		await supabase
-			.from("calls")
-			.update({
-				contact_name: c.name,
-				destination_phone: c.phone_number,
-				status: "dialing",
-			})
-			.eq("id", call.id);
 
 		return xml(`
 <Response>
@@ -131,64 +173,49 @@ export async function POST(request: Request) {
 `);
 	}
 
+	// multiple matches → menu
 	if (matches.length > 1) {
 		const top = matches.slice(0, 3);
+		const phones = top.map((c: any) => c.phone_number).join(",");
 
-		await supabase
-			.from("calls")
-			.update({
-				choice_phones: top.map((c: any) => c.phone_number),
-				retry_count: 0,
-			})
-			.eq("id", call.id);
+		const menuAction = `${baseUrl}/api/twilio/voice/collect?choicePhones=${encodeURIComponent(phones)}`;
 
-		return buildMenu(top, request);
+		const options = top
+			.map((c: any, i: number) => `Press ${i + 1} for ${escape(c.name)}`)
+			.join(". ");
+
+		return xml(`
+<Response>
+	<Gather input="dtmf speech"
+			numDigits="1"
+			timeout="7"
+			action="${menuAction}"
+			method="POST"
+			actionOnEmptyResult="true">
+		<Say>I found multiple matches. ${options}</Say>
+	</Gather>
+</Response>
+`);
 	}
 
 	// no match
-	if (retry < 2) {
-		await supabase
-			.from("calls")
-			.update({
-				retry_count: retry + 1,
-			})
-			.eq("id", call.id);
-
-		const action = `${baseUrlFromRequest(request)}/api/twilio/voice/collect`;
+	if (retryCount < 2) {
+		const retryAction = `${baseUrl}/api/twilio/voice/collect?retry=${retryCount + 1}`;
 
 		return xml(`
 <Response>
 	<Gather input="speech"
-		action="${action}"
+		timeout="5"
+		action="${retryAction}"
 		method="POST"
 		actionOnEmptyResult="true">
-		<Say>I couldn't find that contact. Try again.</Say>
+		<Say>I couldn’t find ${escape(query)}. Try again.</Say>
 	</Gather>
 </Response>
 `);
 	}
 
-	return xml(`<Response><Say>Goodbye.</Say><Hangup/></Response>`);
-}
-
-// ─────────────── MENU BUILDER ───────────────
-function buildMenu(matches: any[], request: Request) {
-	const action = `${baseUrlFromRequest(request)}/api/twilio/voice/collect`;
-
-	const options = matches
-		.map((c, i) => `Press ${i + 1} for ${escape(c.name)}`)
-		.join(". ");
-
-	return xml(`
-<Response>
-	<Gather input="dtmf"
-		numDigits="1"
-		timeout="7"
-		action="${action}"
-		method="POST"
-		actionOnEmptyResult="true">
-		<Say>I found multiple contacts. ${options}</Say>
-	</Gather>
-</Response>
-`);
+	return xml(
+		`<Response><Say>I couldn’t find that contact. Goodbye.</Say><Hangup/></Response>`,
+	);
 }

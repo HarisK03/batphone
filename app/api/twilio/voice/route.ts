@@ -9,9 +9,17 @@ function xml(body: string) {
 }
 
 function baseUrlFromRequest(request: Request) {
-	const host = request.headers.get("host");
-	const proto = host?.includes("localhost") ? "http" : "https";
-	return `${proto}://${host}`;
+	const forwardedProto = request.headers.get("x-forwarded-proto");
+	const forwardedHost = request.headers.get("x-forwarded-host");
+	const host = forwardedHost || request.headers.get("host");
+
+	if (host) {
+		const proto =
+			forwardedProto || (host.includes("localhost") ? "http" : "https");
+		return `${proto}://${host}`;
+	}
+
+	return process.env.AUTH_URL || "";
 }
 
 export async function POST(request: Request) {
@@ -34,23 +42,23 @@ export async function POST(request: Request) {
 
 		if (!user) {
 			return xml(
-				`<Response><Say>This number is not registered.</Say><Hangup/></Response>`,
+				`<Response><Say>This number is not registered. Please set your phone number in the app.</Say><Hangup/></Response>`,
 			);
 		}
 
+		// store call (non-critical, no need to depend on it later)
 		await supabase.from("calls").upsert(
 			{
 				user_id: user.id,
 				twilio_call_sid: callSid,
+				started_at: new Date().toISOString(),
 				status: "inbound",
-				retry_count: 0,
-				choice_phones: null,
 			},
 			{ onConflict: "twilio_call_sid" },
 		);
 
 		const baseUrl = baseUrlFromRequest(request);
-		const action = `${baseUrl}/api/twilio/voice/collect`;
+		const action = `${baseUrl}/api/twilio/voice/collect?retry=0`;
 
 		return xml(`
 <Response>
@@ -59,12 +67,14 @@ export async function POST(request: Request) {
 		action="${action}"
 		method="POST"
 		actionOnEmptyResult="true">
-		<Say>Hi ${user.name || ""}. Who would you like to call?</Say>
+		<Say>Hi ${user.name ?? ""}. Who would you like to call?</Say>
 	</Gather>
 </Response>
 `);
-	} catch (e) {
-		console.error(e);
-		return xml(`<Response><Say>Server error.</Say></Response>`);
+	} catch (err) {
+		console.error(err);
+		return xml(
+			`<Response><Say>Something went wrong. Goodbye.</Say><Hangup/></Response>`,
+		);
 	}
 }
