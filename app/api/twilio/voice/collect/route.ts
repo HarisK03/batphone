@@ -61,11 +61,37 @@ function toT9Digits(value: string) {
     .join("");
 }
 
+function levenshteinDistance(a: string, b: string): number {
+  const dp: number[][] = Array.from({ length: a.length + 1 }, () =>
+    new Array(b.length + 1).fill(0)
+  );
+  for (let i = 0; i <= a.length; i++) dp[i][0] = i;
+  for (let j = 0; j <= b.length; j++) dp[0][j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(
+        dp[i - 1][j] + 1,
+        dp[i][j - 1] + 1,
+        dp[i - 1][j - 1] + cost
+      );
+    }
+  }
+  return dp[a.length][b.length];
+}
+
+function similarityRatio(a: string, b: string): number {
+  const maxLen = Math.max(a.length, b.length);
+  if (maxLen === 0) return 1;
+  return 1 - levenshteinDistance(a, b) / maxLen;
+}
+
 export async function POST(request: Request) {
   const requestUrl = new URL(request.url);
   const retryCount = Number(requestUrl.searchParams.get("retry") ?? "0") || 0;
   const candidatePhonesParam = requestUrl.searchParams.get("candidatePhones") ?? "";
   const choicePhonesParam = requestUrl.searchParams.get("choicePhones") ?? "";
+  const suggestedId = requestUrl.searchParams.get("suggestedId") ?? "";
   const form = await request.formData();
   const callSid = (form.get("CallSid") ?? "").toString();
   const speechResult = (form.get("SpeechResult") ?? "").toString();
@@ -162,10 +188,10 @@ export async function POST(request: Request) {
 
   // DTMF disambiguation menu: "Press 1 for ..., 2 for ..., 3 for ..."
   if (choicePhones.length > 0) {
-    const choiceSet = new Set(choicePhones.map(String));
-    const choiceMatches = contactRows.filter((c: any) =>
-      choiceSet.has(String(c.phone_number)),
-    );
+    // Preserve the order presented in the menu by mapping phone numbers to contacts in sequence
+    const choiceMatches = choicePhones
+      .map((phone) => contactRows.find((c: any) => String(c.phone_number) === String(phone)))
+      .filter((c: any): c is any => c != null);
 
     const selected = Number(digitsOnlyInput);
     if (Number.isInteger(selected) && selected >= 1 && selected <= choiceMatches.length) {
@@ -338,33 +364,43 @@ export async function POST(request: Request) {
       arr.findIndex((x: any) => String(x.id) === String(item.id)) === index,
   );
 
+  // If no direct matches, try similarity-based suggestions
+  let suggestionMode = false;
+  if (mergedCandidates.length === 0) {
+    suggestionMode = true;
+    const scored = contactRows
+      .map((c: any) => ({
+        contact: c,
+        score: similarityRatio(normalizeText(c.name), normalizedQuery),
+      }))
+      .filter((item) => item.score >= 0.6)
+      .sort((a, b) => b.score - a.score);
+    mergedCandidates.push(...scored.slice(0, 3).map((item) => item.contact));
+  }
+
   if (mergedCandidates.length > 1 && retryCount < MAX_GATHER_RETRIES) {
+    const top = mergedCandidates.slice(0, 3);
     const baseUrl = baseUrlFromRequest(request);
     const retryAction = `${baseUrl}/api/twilio/voice/collect?retry=${
       retryCount + 1
-    }&candidatePhones=${encodeURIComponent(
-      mergedCandidates
-        .slice(0, 3)
-        .map((c: any) => String(c.phone_number))
-        .join(","),
+    }&choicePhones=${encodeURIComponent(
+      top.map((c: any) => String(c.phone_number)).join(","),
     )}`;
+    const prompts = top
+      .map((c: any, i: number) => `Press ${i + 1} for ${escapeForSay(String(c.name || ""))}.`)
+      .join(" ");
 
-    const topNames = mergedCandidates
-      .slice(0, 3)
-      .map((c: any) => escapeForSay(String(c.name || "")))
-      .filter(Boolean);
-    const optionsText =
-      topNames.length > 0 ? topNames.join(", ") : "multiple contacts";
+    const intro = suggestionMode
+      ? `I couldn't find an exact match for ${escapeForSay(query)}. Did you mean: ${prompts}`
+      : `I found multiple matches for ${escapeForSay(query)}: ${prompts}`;
 
     return xml(
       [
         "<Response>",
-        `<Gather input="speech dtmf" timeout="5" actionOnEmptyResult="true" action="${retryAction}" method="POST">`,
-        `<Say>I found multiple matches for ${escapeForSay(
-          query,
-        )}: ${optionsText}. Please say the last 4 digits of the phone number.</Say>`,
+        `<Gather input="dtmf" numDigits="1" timeout="5" actionOnEmptyResult="true" action="${retryAction}" method="POST">`,
+        `<Say>${intro}</Say>`,
         "</Gather>",
-        "<Say>Sorry, I failed three times to identify the contact. Ending the call now. Goodbye.</Say>",
+        "<Say>Sorry, I couldn't identify a single contact. Ending the call now. Goodbye.</Say>",
         "<Hangup/>",
         "</Response>",
       ].join(""),

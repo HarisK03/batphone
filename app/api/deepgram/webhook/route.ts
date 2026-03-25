@@ -131,45 +131,34 @@ export async function POST(request: Request) {
 			})
 			.filter((u) => u.text.length > 0);
 
-		if (utterances.length === 0) {
-			await supabase
-				.from("calls")
-				.update({
-					transcript_status: "failed",
-					transcript_error: "Deepgram returned no utterances.",
-				})
-				.eq("id", callId);
-			return new Response("ok", { status: 200 });
-		}
-
 		const callerLabel =
 			(user.name as string | null)?.trim() || (user.email as string) || "You";
 		const contactLabel =
 			(call.contact_name as string | null)?.trim() || "Contact";
 
-		const transcriptText = buildDeepgramLabeledTranscript(
-			utterances,
-			callerLabel,
-			contactLabel,
-		);
-
-		if (!transcriptText.trim()) {
-			await supabase
-				.from("calls")
-				.update({
-					transcript_status: "failed",
-					transcript_error: "Deepgram produced an empty transcript.",
-				})
-				.eq("id", callId);
-			return new Response("ok", { status: 200 });
+		let transcriptText = "";
+		if (utterances.length > 0) {
+			transcriptText = buildDeepgramLabeledTranscript(
+				utterances,
+				callerLabel,
+				contactLabel,
+			);
 		}
+
+		const isTranscriptionSucceeded = utterances.length > 0 && transcriptText.trim().length > 0;
+		const transcriptStatus: "completed" | "failed" = isTranscriptionSucceeded ? "completed" : "failed";
+		const transcriptError = isTranscriptionSucceeded
+			? null
+			: utterances.length === 0
+				? "Deepgram returned no utterances."
+				: "Deepgram produced an empty transcript.";
 
 		await supabase
 			.from("calls")
 			.update({
-				transcript_status: "completed",
+				transcript_status: transcriptStatus,
 				transcript_text: transcriptText,
-				transcript_error: null,
+				transcript_error: transcriptError,
 			})
 			.eq("id", callId);
 

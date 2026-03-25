@@ -59,6 +59,17 @@ export async function POST(request: Request) {
     return new Response("Invalid phone number", { status: 400 });
   }
 
+  // Check for case-insensitive duplicate name for this user
+  const { data: existing } = await supabase
+    .from("contacts")
+    .select("id")
+    .eq("user_id", user.id)
+    .ilike("name", parsed.data.name)
+    .maybeSingle();
+  if (existing) {
+    return new Response("A contact with this name already exists", { status: 409 });
+  }
+
   const { data, error } = await supabase
     .from("contacts")
     .insert({
@@ -118,6 +129,18 @@ export async function PUT(request: Request) {
   const normalizedPhoneNumber = normalizePhoneNumber(parsed.data.phoneNumber);
   if (!normalizedPhoneNumber) {
     return new Response("Invalid phone number", { status: 400 });
+  }
+
+  // Check for case-insensitive duplicate name among other contacts
+  const { data: conflict } = await supabase
+    .from("contacts")
+    .select("id")
+    .eq("user_id", user.id)
+    .ilike("name", parsed.data.name)
+    .neq("id", parsed.data.id)
+    .maybeSingle();
+  if (conflict) {
+    return new Response("A contact with this name already exists", { status: 409 });
   }
 
   const { data, error } = await supabase
