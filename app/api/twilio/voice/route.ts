@@ -81,20 +81,15 @@ export async function POST(request: Request) {
 		}
 
 		const baseUrl = baseUrlFromRequest(request);
-		// This is the ONLY entry point — collect?retry=0 with no choicePhones.
-		// We do NOT use actionOnEmptyResult here. Instead we use <Redirect> as
-		// the fallback so that if the <Gather> times out without any speech,
-		// Twilio falls through to the <Redirect> and re-prompts via collect
-		// rather than looping back to this voice route and saying "Hi" again.
 		const collectUrl = `${baseUrl}/api/twilio/voice/collect?retry=0`;
 
 		const twiml = [
 			"<Response>",
+			// No actionOnEmptyResult — <Redirect> below handles timeouts so we
+			// never loop back to this route mid-call and replay the "Hi" greeting.
 			`<Gather input="speech dtmf" timeout="5" action="${collectUrl}" method="POST">`,
 			`<Say>Hi${user.name ? " " + user.name : ""}. Who would you like to call?</Say>`,
 			"</Gather>",
-			// Fallback: if Gather times out with no input, redirect to collect
-			// which will re-prompt rather than looping back here.
 			`<Redirect method="POST">${collectUrl}</Redirect>`,
 			"</Response>",
 		].join("");

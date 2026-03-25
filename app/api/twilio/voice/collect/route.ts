@@ -106,8 +106,7 @@ function similarityRatio(a: string, b: string): number {
 }
 
 export async function POST(request: Request) {
-  try {
-    const requestUrl = new URL(request.url);
+	const requestUrl = new URL(request.url);
 	const retryCount = Number(requestUrl.searchParams.get("retry") ?? "0") || 0;
 	const candidatePhonesParam =
 		requestUrl.searchParams.get("candidatePhones") ?? "";
@@ -123,134 +122,137 @@ export async function POST(request: Request) {
 
 	const baseUrl = baseUrlFromRequest(request);
 
-	// ─── DISAMBIGUATION MENU (choicePhones set) ──────────────────────────────
-	// This branch is checked BEFORE the empty-query guard. When a <Gather>
-	// times out, Twilio falls through to the <Redirect> (no actionOnEmptyResult)
-	// and posts here again with an empty body but choicePhones still in the URL.
+	// ─── DISAMBIGUATION MENU ──────────────────────────────────────────────────
+	// Checked BEFORE the empty-query guard. When Twilio times out on a <Gather>
+	// and falls through to <Redirect>, it posts here with an empty body but
+	// choicePhones is still in the URL — we must handle that before bailing out.
 	const choicePhones = choicePhonesParam
 		.split(",")
 		.map((s) => s.trim())
 		.filter(Boolean);
 
 	if (choicePhones.length > 0) {
-		if (callSid) {
-			const supabase = getSupabaseServiceClient();
-			const { data: call } = await supabase
+		if (!callSid) {
+			return xml(
+				`<Response><Say>Sorry, something went wrong. Goodbye.</Say><Hangup/></Response>`,
+			);
+		}
+
+		const supabase = getSupabaseServiceClient();
+		const { data: call } = await supabase
+			.from("calls")
+			.select("id,user_id")
+			.eq("twilio_call_sid", callSid)
+			.maybeSingle();
+
+		if (!call) {
+			return xml(
+				`<Response><Say>Unable to find your call. Goodbye.</Say><Hangup/></Response>`,
+			);
+		}
+
+		const { data: contacts } = await supabase
+			.from("contacts")
+			.select("id,name,phone_number")
+			.eq("user_id", call.user_id)
+			.limit(200);
+
+		const contactRows = (contacts ?? []) as any[];
+
+		const choiceMatches = choicePhones
+			.map((phone) =>
+				contactRows.find(
+					(c: any) => String(c.phone_number) === String(phone),
+				),
+			)
+			.filter((c: any): c is any => c != null);
+
+		// Valid digit pressed — dial the chosen contact.
+		const selected = Number(digitsOnlyInput);
+		if (
+			digitsOnlyInput.length > 0 &&
+			Number.isInteger(selected) &&
+			selected >= 1 &&
+			selected <= choiceMatches.length
+		) {
+			const match = choiceMatches[selected - 1];
+
+			await supabase
 				.from("calls")
-				.select("id,user_id")
-				.eq("twilio_call_sid", callSid)
-				.maybeSingle();
+				.update({
+					contact_name: match.name,
+					destination_phone: match.phone_number,
+					status: "dialing",
+				})
+				.eq("id", call.id);
 
-			if (call) {
-				const { data: contacts } = await supabase
-					.from("contacts")
-					.select("id,name,phone_number")
-					.eq("user_id", call.user_id)
-					.limit(200);
+			const recordingCallback = `${baseUrl}/api/twilio/recording`;
+			const statusCallback = `${baseUrl}/api/twilio/call-status`;
+			const callerId = process.env.TWILIO_PHONE_NUMBER || "";
 
-				const contactRows = (contacts ?? []) as any[];
+			return xml(
+				[
+					"<Response>",
+					`<Say>Calling ${escapeForSay(String(match.name || ""))}.</Say>`,
+					`<Dial callerId="${callerId}" record="record-from-answer" recordingChannels="dual" recordingStatusCallback="${recordingCallback}" recordingStatusCallbackMethod="POST" action="${statusCallback}" method="POST">`,
+					`<Number>${match.phone_number}</Number>`,
+					"</Dial>",
+					"</Response>",
+				].join(""),
+			);
+		}
 
-				const choiceMatches = choicePhones
-					.map((phone) =>
-						contactRows.find(
-							(c: any) =>
-								String(c.phone_number) === String(phone),
-						),
-					)
-					.filter((c: any): c is any => c != null);
+		// No valid digit — re-present the menu if retries remain.
+		if (choiceMatches.length > 0 && retryCount < MAX_GATHER_RETRIES) {
+			const menuAction = `${baseUrl}/api/twilio/voice/collect?retry=${retryCount + 1}&choicePhones=${encodeURIComponent(choicePhonesParam)}`;
+			const prompts = choiceMatches
+				.slice(0, 3)
+				.map(
+					(c: any, i: number) =>
+						`Press ${i + 1} for ${escapeForSay(String(c.name || ""))}.`,
+				)
+				.join(" ");
 
-				// Valid digit pressed — dial the chosen contact.
-				const selected = Number(digitsOnlyInput);
-				if (
-					digitsOnlyInput.length > 0 &&
-					Number.isInteger(selected) &&
-					selected >= 1 &&
-					selected <= choiceMatches.length
-				) {
-					const match = choiceMatches[selected - 1];
+			return xml(
+				[
+					"<Response>",
+					`<Gather input="dtmf" numDigits="1" timeout="7" action="${menuAction}" method="POST">`,
+					`<Say>Please press a number to select a contact. ${prompts}</Say>`,
+					"</Gather>",
+					// <Redirect> preserves choicePhones on timeout — no actionOnEmptyResult
+					`<Redirect method="POST">${menuAction}</Redirect>`,
+					"</Response>",
+				].join(""),
+			);
+		}
 
-					await supabase
-						.from("calls")
-						.update({
-							contact_name: match.name,
-							destination_phone: match.phone_number,
-							status: "dialing",
-						})
-						.eq("id", call.id);
+		// Retries exhausted — dial the first match rather than erroring out.
+		if (choiceMatches.length > 0) {
+			const match = choiceMatches[0];
 
-					const recordingCallback = `${baseUrl}/api/twilio/recording`;
-					const statusCallback = `${baseUrl}/api/twilio/call-status`;
-					const callerId = process.env.TWILIO_PHONE_NUMBER || "";
+			await supabase
+				.from("calls")
+				.update({
+					contact_name: match.name,
+					destination_phone: match.phone_number,
+					status: "dialing",
+				})
+				.eq("id", call.id);
 
-					return xml(
-						[
-							"<Response>",
-							`<Say>Calling ${escapeForSay(String(match.name || ""))}.</Say>`,
-							`<Dial callerId="${callerId}" record="record-from-answer" recordingChannels="dual" recordingStatusCallback="${recordingCallback}" recordingStatusCallbackMethod="POST" action="${statusCallback}" method="POST">`,
-							`<Number>${match.phone_number}</Number>`,
-							"</Dial>",
-							"</Response>",
-						].join(""),
-					);
-				}
+			const recordingCallback = `${baseUrl}/api/twilio/recording`;
+			const statusCallback = `${baseUrl}/api/twilio/call-status`;
+			const callerId = process.env.TWILIO_PHONE_NUMBER || "";
 
-				// No valid digit received (timeout or wrong input).
-				// Re-present the menu if retries remain, preserving choicePhones.
-				if (
-					choiceMatches.length > 0 &&
-					retryCount < MAX_GATHER_RETRIES
-				) {
-					const menuAction = `${baseUrl}/api/twilio/voice/collect?retry=${retryCount + 1}&choicePhones=${encodeURIComponent(choicePhonesParam)}`;
-					const prompts = choiceMatches
-						.slice(0, 3)
-						.map(
-							(c: any, i: number) =>
-								`Press ${i + 1} for ${escapeForSay(String(c.name || ""))}.`,
-						)
-						.join(" ");
-
-					return xml(
-						[
-							"<Response>",
-							`<Gather input="dtmf" numDigits="1" timeout="7" action="${menuAction}" method="POST">`,
-							`<Say>Please press a number to select a contact. ${prompts}</Say>`,
-							"</Gather>",
-							// <Redirect> instead of actionOnEmptyResult so choicePhones is never dropped
-							`<Redirect method="POST">${menuAction}</Redirect>`,
-							"</Response>",
-						].join(""),
-					);
-				}
-
-				// Retries exhausted — dial the first match rather than erroring.
-				if (choiceMatches.length > 0) {
-					const match = choiceMatches[0];
-
-					await supabase
-						.from("calls")
-						.update({
-							contact_name: match.name,
-							destination_phone: match.phone_number,
-							status: "dialing",
-						})
-						.eq("id", call.id);
-
-					const recordingCallback = `${baseUrl}/api/twilio/recording`;
-					const statusCallback = `${baseUrl}/api/twilio/call-status`;
-					const callerId = process.env.TWILIO_PHONE_NUMBER || "";
-
-					return xml(
-						[
-							"<Response>",
-							`<Say>No selection received. Calling ${escapeForSay(String(match.name || ""))}.</Say>`,
-							`<Dial callerId="${callerId}" record="record-from-answer" recordingChannels="dual" recordingStatusCallback="${recordingCallback}" recordingStatusCallbackMethod="POST" action="${statusCallback}" method="POST">`,
-							`<Number>${match.phone_number}</Number>`,
-							"</Dial>",
-							"</Response>",
-						].join(""),
-					);
-				}
-			}
+			return xml(
+				[
+					"<Response>",
+					`<Say>No selection received. Calling ${escapeForSay(String(match.name || ""))}.</Say>`,
+					`<Dial callerId="${callerId}" record="record-from-answer" recordingChannels="dual" recordingStatusCallback="${recordingCallback}" recordingStatusCallbackMethod="POST" action="${statusCallback}" method="POST">`,
+					`<Number>${match.phone_number}</Number>`,
+					"</Dial>",
+					"</Response>",
+				].join(""),
+			);
 		}
 
 		return xml(
@@ -504,7 +506,7 @@ export async function POST(request: Request) {
 		return xml(
 			[
 				"<Response>",
-				// No actionOnEmptyResult — <Redirect> handles timeout so choicePhones is preserved
+				// No actionOnEmptyResult — <Redirect> handles timeout so choicePhones is never lost
 				`<Gather input="dtmf" numDigits="1" timeout="7" action="${menuAction}" method="POST">`,
 				`<Say>${intro}</Say>`,
 				"</Gather>",
@@ -536,10 +538,4 @@ export async function POST(request: Request) {
 	}
 
 	return dialContact(match);
-  } catch (error) {
-    console.error("[twilio/voice/collect] unhandled error", error);
-    return xml(
-      `<Response><Say>Sorry, we hit a server issue. Please try again later.</Say><Hangup/></Response>`
-    );
-  }
 }
