@@ -232,12 +232,12 @@ export async function POST(request: Request) {
 			contact: c,
 			score: similarity(normalize(c.name), normalizedQuery),
 		}))
-		.filter((x) => x.score > 0.6)
-		.sort((a, b) => b.score - a.score)
+		.filter((x: any) => x.score > 0.6)
+		.sort((a: any, b: any) => b.score - a.score)
 		.slice(0, 3);
 
 	if (scored.length > 0) {
-		const top = scored.map((s) => s.contact);
+		const top = scored.map((s: any) => s.contact);
 		const phones = top.map((c: any) => c.phone_number).join(",");
 
 		const menuAction = `${baseUrl}/api/twilio/voice/collect?choicePhones=${encodeURIComponent(phones)}`;
