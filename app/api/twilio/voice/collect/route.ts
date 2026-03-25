@@ -111,7 +111,6 @@ export async function POST(request: Request) {
 	const candidatePhonesParam =
 		requestUrl.searchParams.get("candidatePhones") ?? "";
 	const choicePhonesParam = requestUrl.searchParams.get("choicePhones") ?? "";
-	const suggestedId = requestUrl.searchParams.get("suggestedId") ?? "";
 	const form = await request.formData();
 	const callSid = (form.get("CallSid") ?? "").toString();
 	const speechResult = (form.get("SpeechResult") ?? "").toString();
@@ -121,27 +120,164 @@ export async function POST(request: Request) {
 
 	const query = (speechResult || digits).trim();
 
+	const baseUrl = baseUrlFromRequest(request);
+
+	// ─── DISAMBIGUATION MENU (choicePhones set) ──────────────────────────────
+	// This branch is checked BEFORE the empty-query guard. When a <Gather>
+	// times out, Twilio falls through to the <Redirect> (no actionOnEmptyResult)
+	// and posts here again with an empty body but choicePhones still in the URL.
+	const choicePhones = choicePhonesParam
+		.split(",")
+		.map((s) => s.trim())
+		.filter(Boolean);
+
+	if (choicePhones.length > 0) {
+		if (callSid) {
+			const supabase = getSupabaseServiceClient();
+			const { data: call } = await supabase
+				.from("calls")
+				.select("id,user_id")
+				.eq("twilio_call_sid", callSid)
+				.maybeSingle();
+
+			if (call) {
+				const { data: contacts } = await supabase
+					.from("contacts")
+					.select("id,name,phone_number")
+					.eq("user_id", call.user_id)
+					.limit(200);
+
+				const contactRows = (contacts ?? []) as any[];
+
+				const choiceMatches = choicePhones
+					.map((phone) =>
+						contactRows.find(
+							(c: any) =>
+								String(c.phone_number) === String(phone),
+						),
+					)
+					.filter((c: any): c is any => c != null);
+
+				// Valid digit pressed — dial the chosen contact.
+				const selected = Number(digitsOnlyInput);
+				if (
+					digitsOnlyInput.length > 0 &&
+					Number.isInteger(selected) &&
+					selected >= 1 &&
+					selected <= choiceMatches.length
+				) {
+					const match = choiceMatches[selected - 1];
+
+					await supabase
+						.from("calls")
+						.update({
+							contact_name: match.name,
+							destination_phone: match.phone_number,
+							status: "dialing",
+						})
+						.eq("id", call.id);
+
+					const recordingCallback = `${baseUrl}/api/twilio/recording`;
+					const statusCallback = `${baseUrl}/api/twilio/call-status`;
+					const callerId = process.env.TWILIO_PHONE_NUMBER || "";
+
+					return xml(
+						[
+							"<Response>",
+							`<Say>Calling ${escapeForSay(String(match.name || ""))}.</Say>`,
+							`<Dial callerId="${callerId}" record="record-from-answer" recordingChannels="dual" recordingStatusCallback="${recordingCallback}" recordingStatusCallbackMethod="POST" action="${statusCallback}" method="POST">`,
+							`<Number>${match.phone_number}</Number>`,
+							"</Dial>",
+							"</Response>",
+						].join(""),
+					);
+				}
+
+				// No valid digit received (timeout or wrong input).
+				// Re-present the menu if retries remain, preserving choicePhones.
+				if (
+					choiceMatches.length > 0 &&
+					retryCount < MAX_GATHER_RETRIES
+				) {
+					const menuAction = `${baseUrl}/api/twilio/voice/collect?retry=${retryCount + 1}&choicePhones=${encodeURIComponent(choicePhonesParam)}`;
+					const prompts = choiceMatches
+						.slice(0, 3)
+						.map(
+							(c: any, i: number) =>
+								`Press ${i + 1} for ${escapeForSay(String(c.name || ""))}.`,
+						)
+						.join(" ");
+
+					return xml(
+						[
+							"<Response>",
+							`<Gather input="dtmf" numDigits="1" timeout="7" action="${menuAction}" method="POST">`,
+							`<Say>Please press a number to select a contact. ${prompts}</Say>`,
+							"</Gather>",
+							// <Redirect> instead of actionOnEmptyResult so choicePhones is never dropped
+							`<Redirect method="POST">${menuAction}</Redirect>`,
+							"</Response>",
+						].join(""),
+					);
+				}
+
+				// Retries exhausted — dial the first match rather than erroring.
+				if (choiceMatches.length > 0) {
+					const match = choiceMatches[0];
+
+					await supabase
+						.from("calls")
+						.update({
+							contact_name: match.name,
+							destination_phone: match.phone_number,
+							status: "dialing",
+						})
+						.eq("id", call.id);
+
+					const recordingCallback = `${baseUrl}/api/twilio/recording`;
+					const statusCallback = `${baseUrl}/api/twilio/call-status`;
+					const callerId = process.env.TWILIO_PHONE_NUMBER || "";
+
+					return xml(
+						[
+							"<Response>",
+							`<Say>No selection received. Calling ${escapeForSay(String(match.name || ""))}.</Say>`,
+							`<Dial callerId="${callerId}" record="record-from-answer" recordingChannels="dual" recordingStatusCallback="${recordingCallback}" recordingStatusCallbackMethod="POST" action="${statusCallback}" method="POST">`,
+							`<Number>${match.phone_number}</Number>`,
+							"</Dial>",
+							"</Response>",
+						].join(""),
+					);
+				}
+			}
+		}
+
+		return xml(
+			`<Response><Say>Sorry, something went wrong. Goodbye.</Say><Hangup/></Response>`,
+		);
+	}
+
+	// ─── EMPTY QUERY ─────────────────────────────────────────────────────────
 	if (!callSid || !query) {
 		if (retryCount < MAX_GATHER_RETRIES) {
-			const baseUrl = baseUrlFromRequest(request);
 			const retryAction = `${baseUrl}/api/twilio/voice/collect?retry=${retryCount + 1}`;
 			return xml(
 				[
 					"<Response>",
-					`<Gather input="speech dtmf" timeout="5" actionOnEmptyResult="true" action="${retryAction}" method="POST">`,
+					`<Gather input="speech dtmf" timeout="5" action="${retryAction}" method="POST">`,
 					"<Say>Sorry, I didn't catch that. Please say the contact name again.</Say>",
 					"</Gather>",
-					"<Say>Sorry, I failed three times to understand. Ending the call now. Goodbye.</Say>",
-					"<Hangup/>",
+					`<Redirect method="POST">${retryAction}</Redirect>`,
 					"</Response>",
 				].join(""),
 			);
 		}
 		return xml(
-			`<Response><Say>Sorry, I didn't catch that. Goodbye.</Say><Hangup/></Response>`,
+			`<Response><Say>Sorry, I failed to understand. Goodbye.</Say><Hangup/></Response>`,
 		);
 	}
 
+	// ─── LOAD CALL + CONTACTS ─────────────────────────────────────────────────
 	const supabase = getSupabaseServiceClient();
 	const { data: call, error } = await supabase
 		.from("calls")
@@ -174,10 +310,6 @@ export async function POST(request: Request) {
 		.split(",")
 		.map((s) => s.trim())
 		.filter(Boolean);
-	const choicePhones = choicePhonesParam
-		.split(",")
-		.map((s) => s.trim())
-		.filter(Boolean);
 
 	const dialContact = async (match: any) => {
 		await supabase
@@ -189,7 +321,6 @@ export async function POST(request: Request) {
 			})
 			.eq("id", call.id);
 
-		const baseUrl = baseUrlFromRequest(request);
 		const recordingCallback = `${baseUrl}/api/twilio/recording`;
 		const statusCallback = `${baseUrl}/api/twilio/call-status`;
 		const callerId = process.env.TWILIO_PHONE_NUMBER || "";
@@ -206,62 +337,7 @@ export async function POST(request: Request) {
 		);
 	};
 
-	// DTMF disambiguation menu: "Press 1 for ..., 2 for ..., 3 for ..."
-	if (choicePhones.length > 0) {
-		// Preserve the order presented in the menu by mapping phone numbers to contacts in sequence
-		const choiceMatches = choicePhones
-			.map((phone) =>
-				contactRows.find(
-					(c: any) => String(c.phone_number) === String(phone),
-				),
-			)
-			.filter((c: any): c is any => c != null);
-
-		const selected = Number(digitsOnlyInput);
-		if (
-			Number.isInteger(selected) &&
-			selected >= 1 &&
-			selected <= choiceMatches.length
-		) {
-			return dialContact(choiceMatches[selected - 1]);
-		}
-
-		// Always re-prompt when choicePhones is set, regardless of what input was received.
-		// Previously this only re-prompted on invalid DTMF, which caused speech input ("adam")
-		// to fall through and re-run the full search — hitting the retry limit and erroring.
-		if (retryCount < MAX_GATHER_RETRIES && choiceMatches.length > 0) {
-			const baseUrl = baseUrlFromRequest(request);
-			const retryAction = `${baseUrl}/api/twilio/voice/collect?retry=${
-				retryCount + 1
-			}&choicePhones=${encodeURIComponent(choicePhonesParam)}`;
-			const prompts = choiceMatches
-				.slice(0, 3)
-				.map(
-					(c: any, i: number) =>
-						`Press ${i + 1} for ${escapeForSay(String(c.name || ""))}.`,
-				)
-				.join(" ");
-			return xml(
-				[
-					"<Response>",
-					`<Gather input="dtmf" numDigits="1" timeout="5" actionOnEmptyResult="true" action="${retryAction}" method="POST">`,
-					`<Say>Please press a number to select. ${prompts}</Say>`,
-					"</Gather>",
-					"<Say>Sorry, I couldn't identify a single contact. Ending the call now. Goodbye.</Say>",
-					"<Hangup/>",
-					"</Response>",
-				].join(""),
-			);
-		}
-
-		// Last resort: dial the first match
-		if (choiceMatches.length > 0) {
-			return dialContact(choiceMatches[0]);
-		}
-	}
-
-	// If we were given a shortlist of candidate phone numbers (from a previous
-	// ambiguous match), disambiguate using the last-4 digits.
+	// ─── CANDIDATE PHONES (last-4 disambiguation) ────────────────────────────
 	if (candidatePhones.length > 0) {
 		const candidateSet = new Set(candidatePhones.map(String));
 		const shortlist = contactRows.filter((c: any) =>
@@ -281,30 +357,23 @@ export async function POST(request: Request) {
 			}
 
 			if (last4Matches.length > 1 && retryCount < MAX_GATHER_RETRIES) {
-				const baseUrl = baseUrlFromRequest(request);
-				const retryAction = `${baseUrl}/api/twilio/voice/collect?retry=${
-					retryCount + 1
-				}&candidatePhones=${encodeURIComponent(candidatePhonesParam)}`;
-
+				const retryAction = `${baseUrl}/api/twilio/voice/collect?retry=${retryCount + 1}&candidatePhones=${encodeURIComponent(candidatePhonesParam)}`;
 				return xml(
 					[
 						"<Response>",
-						`<Gather input="speech dtmf" timeout="5" actionOnEmptyResult="true" action="${retryAction}" method="POST">`,
+						`<Gather input="speech dtmf" timeout="5" action="${retryAction}" method="POST">`,
 						`<Say>I found multiple contacts with those last 4 digits. Please say the last 4 digits again.</Say>`,
 						"</Gather>",
-						"<Say>Sorry, I couldn't identify a single contact. Ending the call now. Goodbye.</Say>",
-						"<Hangup/>",
+						`<Redirect method="POST">${retryAction}</Redirect>`,
 						"</Response>",
 					].join(""),
 				);
 			}
-			// If we still can't disambiguate, fall back to the first match.
 			if (last4Matches.length > 0) {
 				return dialContact(last4Matches[0]);
 			}
 		}
 
-		// If last4 wasn't usable, treat the query as a name and match within the shortlist.
 		const queryTokens = normalizedQuery.split(" ").filter(Boolean);
 		const exactMatches = shortlist.filter(
 			(c: any) => normalizeText(c.name) === normalizedQuery,
@@ -331,15 +400,13 @@ export async function POST(request: Request) {
 				index,
 		);
 
-		// If we have candidates, just pick the first one.
 		const match = mergedCandidates[0];
 		if (match) {
 			return dialContact(match);
 		}
 	}
 
-	// Initial DTMF/T9 flow:
-	// user enters keypad digits, we map contact names to T9 and match prefixes.
+	// ─── T9 / DTMF INPUT ─────────────────────────────────────────────────────
 	if (isDtmfInput) {
 		const t9Matches = contactRows.filter((c: any) =>
 			toT9Digits(String(c.name ?? "")).startsWith(digitsOnlyInput),
@@ -351,12 +418,10 @@ export async function POST(request: Request) {
 
 		if (t9Matches.length > 1 && retryCount < MAX_GATHER_RETRIES) {
 			const top = t9Matches.slice(0, 3);
-			const baseUrl = baseUrlFromRequest(request);
-			const retryAction = `${baseUrl}/api/twilio/voice/collect?retry=${
-				retryCount + 1
-			}&choicePhones=${encodeURIComponent(
-				top.map((c: any) => String(c.phone_number)).join(","),
-			)}`;
+			const phones = top
+				.map((c: any) => String(c.phone_number))
+				.join(",");
+			const menuAction = `${baseUrl}/api/twilio/voice/collect?retry=${retryCount + 1}&choicePhones=${encodeURIComponent(phones)}`;
 			const prompts = top
 				.map(
 					(c: any, i: number) =>
@@ -367,17 +432,17 @@ export async function POST(request: Request) {
 			return xml(
 				[
 					"<Response>",
-					`<Gather input="dtmf" numDigits="1" timeout="5" actionOnEmptyResult="true" action="${retryAction}" method="POST">`,
+					`<Gather input="dtmf" numDigits="1" timeout="7" action="${menuAction}" method="POST">`,
 					`<Say>I found multiple matches for ${digitsOnlyInput}. ${prompts}</Say>`,
 					"</Gather>",
-					"<Say>Sorry, I couldn't identify a single contact. Ending the call now. Goodbye.</Say>",
-					"<Hangup/>",
+					`<Redirect method="POST">${menuAction}</Redirect>`,
 					"</Response>",
 				].join(""),
 			);
 		}
 	}
 
+	// ─── SPEECH SEARCH ───────────────────────────────────────────────────────
 	const queryTokens = normalizedQuery.split(" ").filter(Boolean);
 	const exactMatches = contactRows.filter(
 		(c: any) => normalizeText(c.name) === normalizedQuery,
@@ -404,7 +469,7 @@ export async function POST(request: Request) {
 			index,
 	);
 
-	// If no direct matches, try similarity-based suggestions
+	// Similarity fallback
 	let suggestionMode = false;
 	if (mergedCandidates.length === 0) {
 		suggestionMode = true;
@@ -422,12 +487,8 @@ export async function POST(request: Request) {
 
 	if (mergedCandidates.length > 1 && retryCount < MAX_GATHER_RETRIES) {
 		const top = mergedCandidates.slice(0, 3);
-		const baseUrl = baseUrlFromRequest(request);
-		const retryAction = `${baseUrl}/api/twilio/voice/collect?retry=${
-			retryCount + 1
-		}&choicePhones=${encodeURIComponent(
-			top.map((c: any) => String(c.phone_number)).join(","),
-		)}`;
+		const phones = top.map((c: any) => String(c.phone_number)).join(",");
+		const menuAction = `${baseUrl}/api/twilio/voice/collect?retry=${retryCount + 1}&choicePhones=${encodeURIComponent(phones)}`;
 		const prompts = top
 			.map(
 				(c: any, i: number) =>
@@ -437,16 +498,16 @@ export async function POST(request: Request) {
 
 		const intro = suggestionMode
 			? `I couldn't find an exact match for ${escapeForSay(query)}. Did you mean: ${prompts}`
-			: `I found multiple matches for ${escapeForSay(query)}: ${prompts}`;
+			: `I found multiple matches for ${escapeForSay(query)}. ${prompts}`;
 
 		return xml(
 			[
 				"<Response>",
-				`<Gather input="dtmf" numDigits="1" timeout="5" actionOnEmptyResult="true" action="${retryAction}" method="POST">`,
+				// No actionOnEmptyResult — <Redirect> handles timeout so choicePhones is preserved
+				`<Gather input="dtmf" numDigits="1" timeout="7" action="${menuAction}" method="POST">`,
 				`<Say>${intro}</Say>`,
 				"</Gather>",
-				"<Say>Sorry, I couldn't identify a single contact. Ending the call now. Goodbye.</Say>",
-				"<Hangup/>",
+				`<Redirect method="POST">${menuAction}</Redirect>`,
 				"</Response>",
 			].join(""),
 		);
@@ -456,22 +517,20 @@ export async function POST(request: Request) {
 
 	if (!match) {
 		if (retryCount < MAX_GATHER_RETRIES) {
-			const baseUrl = baseUrlFromRequest(request);
 			const retryAction = `${baseUrl}/api/twilio/voice/collect?retry=${retryCount + 1}`;
 			return xml(
 				[
 					"<Response>",
-					`<Gather input="speech dtmf" timeout="5" actionOnEmptyResult="true" action="${retryAction}" method="POST">`,
-					`<Say>I couldn't find a contact matching ${query}. Please try again.</Say>`,
+					`<Gather input="speech dtmf" timeout="5" action="${retryAction}" method="POST">`,
+					`<Say>I couldn't find a contact matching ${escapeForSay(query)}. Please try again.</Say>`,
 					"</Gather>",
-					"<Say>Sorry, I failed three times to find that contact. Ending the call now. Goodbye.</Say>",
-					"<Hangup/>",
+					`<Redirect method="POST">${retryAction}</Redirect>`,
 					"</Response>",
 				].join(""),
 			);
 		}
 		return xml(
-			`<Response><Say>I couldn't find a contact matching ${query}. Please add them in the bat phone app and try again.</Say><Hangup/></Response>`,
+			`<Response><Say>I couldn't find a contact matching ${escapeForSay(query)}. Please add them in the bat phone app and try again.</Say><Hangup/></Response>`,
 		);
 	}
 
