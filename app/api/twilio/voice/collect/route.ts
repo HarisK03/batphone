@@ -224,14 +224,23 @@ export async function POST(request: Request) {
 `);
 	}
 
-	// ───────────── SUGGESTIONS (🔥 NEW) ─────────────
 	const normalizedQuery = normalize(query);
 
 	const scored = contactRows
-		.map((c: any) => ({
-			contact: c,
-			score: similarity(normalize(c.name), normalizedQuery),
-		}))
+		.map((c: any) => {
+			const nameTokens = normalize(c.name).split(" ");
+
+			const bestScore = Math.max(
+				...nameTokens.map((token) =>
+					similarity(token, normalizedQuery),
+				),
+			);
+
+			return {
+				contact: c,
+				score: bestScore,
+			};
+		})
 		.filter((x: any) => x.score > 0.6)
 		.sort((a: any, b: any) => b.score - a.score)
 		.slice(0, 3);
