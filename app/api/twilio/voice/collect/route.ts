@@ -35,7 +35,7 @@ function escape(text: string) {
 	return text.replace(/[<>&'"]/g, " ").trim();
 }
 
-// ✅ multi-word smart matching
+// 🔹 Smart token matching
 function matchesName(contactName: string, query: string) {
 	const nameTokens = normalize(contactName).split(" ");
 	const queryTokens = normalize(query).split(" ");
@@ -43,7 +43,7 @@ function matchesName(contactName: string, query: string) {
 	return queryTokens.every((q) => nameTokens.some((n) => n.startsWith(q)));
 }
 
-// 🔥 fuzzy matching
+// 🔹 Levenshtein
 function levenshtein(a: string, b: string): number {
 	const dp = Array.from({ length: a.length + 1 }, () =>
 		new Array(b.length + 1).fill(0),
@@ -72,7 +72,6 @@ function similarity(a: string, b: string) {
 	return 1 - levenshtein(a, b) / maxLen;
 }
 
-// speech → number
 const speechMap: Record<string, number> = {
 	one: 1,
 	two: 2,
@@ -100,7 +99,7 @@ export async function POST(request: Request) {
 
 	const { data: call } = await supabase
 		.from("calls")
-		.select("user_id")
+		.select("id,user_id")
 		.eq("twilio_call_sid", callSid)
 		.maybeSingle();
 
@@ -135,10 +134,34 @@ export async function POST(request: Request) {
 		if (index >= 1 && index <= matches.length) {
 			const selected = matches[index - 1];
 
+			// ✅ UPDATE DB (fixes "Unknown")
+			await supabase
+				.from("calls")
+				.update({
+					contact_name: selected.name,
+					destination_phone: selected.phone_number,
+					status: "dialing",
+				})
+				.eq("id", call.id);
+
+			const recordingCallback = `${baseUrl}/api/twilio/recording`;
+			const statusCallback = `${baseUrl}/api/twilio/call-status`;
+			const callerId = process.env.TWILIO_PHONE_NUMBER || "";
+
 			return xml(`
 <Response>
 	<Say>Calling ${escape(selected.name)}</Say>
-	<Dial>${selected.phone_number}</Dial>
+	<Dial
+		callerId="${callerId}"
+		record="record-from-answer"
+		recordingChannels="dual"
+		recordingStatusCallback="${recordingCallback}"
+		recordingStatusCallbackMethod="POST"
+		action="${statusCallback}"
+		method="POST"
+	>
+		<Number>${selected.phone_number}</Number>
+	</Dial>
 </Response>
 `);
 		}
@@ -192,10 +215,33 @@ export async function POST(request: Request) {
 	if (matches.length === 1) {
 		const c = matches[0];
 
+		await supabase
+			.from("calls")
+			.update({
+				contact_name: c.name,
+				destination_phone: c.phone_number,
+				status: "dialing",
+			})
+			.eq("id", call.id);
+
+		const recordingCallback = `${baseUrl}/api/twilio/recording`;
+		const statusCallback = `${baseUrl}/api/twilio/call-status`;
+		const callerId = process.env.TWILIO_PHONE_NUMBER || "";
+
 		return xml(`
 <Response>
 	<Say>Calling ${escape(c.name)}</Say>
-	<Dial>${c.phone_number}</Dial>
+	<Dial
+		callerId="${callerId}"
+		record="record-from-answer"
+		recordingChannels="dual"
+		recordingStatusCallback="${recordingCallback}"
+		recordingStatusCallbackMethod="POST"
+		action="${statusCallback}"
+		method="POST"
+	>
+		<Number>${c.phone_number}</Number>
+	</Dial>
 </Response>
 `);
 	}
@@ -224,29 +270,23 @@ export async function POST(request: Request) {
 `);
 	}
 
+	// ───────────── SUGGESTIONS ─────────────
 	const normalizedQuery = normalize(query);
 
 	const scored = contactRows
 		.map((c: any) => {
-			const nameTokens = normalize(c.name).split(" ");
-
-			const bestScore = Math.max(
-				...nameTokens.map((token) =>
-					similarity(token, normalizedQuery),
-				),
+			const tokens = normalize(c.name).split(" ");
+			const best = Math.max(
+				...tokens.map((t) => similarity(t, normalizedQuery)),
 			);
-
-			return {
-				contact: c,
-				score: bestScore,
-			};
+			return { contact: c, score: best };
 		})
-		.filter((x: any) => x.score > 0.6)
-		.sort((a: any, b: any) => b.score - a.score)
+		.filter((x) => x.score > 0.65)
+		.sort((a, b) => b.score - a.score)
 		.slice(0, 3);
 
 	if (scored.length > 0) {
-		const top = scored.map((s: any) => s.contact);
+		const top = scored.map((s) => s.contact);
 		const phones = top.map((c: any) => c.phone_number).join(",");
 
 		const menuAction = `${baseUrl}/api/twilio/voice/collect?choicePhones=${encodeURIComponent(phones)}`;
