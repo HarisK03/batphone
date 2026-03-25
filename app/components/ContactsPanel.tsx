@@ -196,7 +196,11 @@ export function ContactsPanel() {
           phoneNumber: parsedPhone.e164,
         }),
       });
-      if (!res.ok) return;
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "Failed to add contact.");
+        setMessage(errText);
+        return;
+      }
       const data = await res.json();
       setContacts((prev) => [...prev, data.contact]);
       setName("");
@@ -343,6 +347,8 @@ export function ContactsPanel() {
 
       if (!res.ok) {
         setContacts(prev);
+        const errText = await res.text().catch(() => "Failed to update contact.");
+        setMessage(errText);
         return;
       }
 
