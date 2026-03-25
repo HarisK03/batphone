@@ -42,11 +42,11 @@ export async function POST(request: Request) {
 
 		if (!user) {
 			return xml(
-				`<Response><Say>This number is not registered. Please set your phone number in the app.</Say><Hangup/></Response>`,
+				`<Response><Say>This number is not registered. Please configure it in the app.</Say><Hangup/></Response>`,
 			);
 		}
 
-		// store call (non-critical, no need to depend on it later)
+		// store call (non-critical)
 		await supabase.from("calls").upsert(
 			{
 				user_id: user.id,

@@ -35,12 +35,41 @@ function escape(text: string) {
 	return text.replace(/[<>&'"]/g, " ").trim();
 }
 
-// 🔥 Better matching (supports multi-word names)
+// ✅ multi-word smart matching
 function matchesName(contactName: string, query: string) {
 	const nameTokens = normalize(contactName).split(" ");
 	const queryTokens = normalize(query).split(" ");
 
 	return queryTokens.every((q) => nameTokens.some((n) => n.startsWith(q)));
+}
+
+// 🔥 fuzzy matching
+function levenshtein(a: string, b: string): number {
+	const dp = Array.from({ length: a.length + 1 }, () =>
+		new Array(b.length + 1).fill(0),
+	);
+
+	for (let i = 0; i <= a.length; i++) dp[i][0] = i;
+	for (let j = 0; j <= b.length; j++) dp[0][j] = j;
+
+	for (let i = 1; i <= a.length; i++) {
+		for (let j = 1; j <= b.length; j++) {
+			const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+			dp[i][j] = Math.min(
+				dp[i - 1][j] + 1,
+				dp[i][j - 1] + 1,
+				dp[i - 1][j - 1] + cost,
+			);
+		}
+	}
+
+	return dp[a.length][b.length];
+}
+
+function similarity(a: string, b: string) {
+	const maxLen = Math.max(a.length, b.length);
+	if (maxLen === 0) return 1;
+	return 1 - levenshtein(a, b) / maxLen;
 }
 
 // speech → number
@@ -52,6 +81,7 @@ const speechMap: Record<string, number> = {
 
 export async function POST(request: Request) {
 	const requestUrl = new URL(request.url);
+
 	const retryCount = Number(requestUrl.searchParams.get("retry") ?? "0");
 	const choicePhonesParam = requestUrl.searchParams.get("choicePhones") ?? "";
 
@@ -68,7 +98,6 @@ export async function POST(request: Request) {
 
 	const supabase = getSupabaseServiceClient();
 
-	// get user via callSid → fallback safe
 	const { data: call } = await supabase
 		.from("calls")
 		.select("user_id")
@@ -88,7 +117,7 @@ export async function POST(request: Request) {
 
 	const contactRows = contacts ?? [];
 
-	// ─────────────── DISAMBIGUATION ───────────────
+	// ───────────── DISAMBIGUATION ─────────────
 	const choicePhones = choicePhonesParam
 		.split(",")
 		.map((s) => s.trim())
@@ -114,7 +143,6 @@ export async function POST(request: Request) {
 `);
 		}
 
-		// retry menu
 		const menuAction = `${baseUrl}/api/twilio/voice/collect?choicePhones=${encodeURIComponent(choicePhonesParam)}`;
 
 		const options = matches
@@ -135,7 +163,7 @@ export async function POST(request: Request) {
 `);
 	}
 
-	// ─────────────── EMPTY INPUT ───────────────
+	// ───────────── EMPTY INPUT ─────────────
 	if (!query) {
 		if (retryCount < 2) {
 			const retryAction = `${baseUrl}/api/twilio/voice/collect?retry=${retryCount + 1}`;
@@ -158,10 +186,9 @@ export async function POST(request: Request) {
 		);
 	}
 
-	// ─────────────── SEARCH ───────────────
+	// ───────────── SEARCH ─────────────
 	const matches = contactRows.filter((c: any) => matchesName(c.name, query));
 
-	// single match
 	if (matches.length === 1) {
 		const c = matches[0];
 
@@ -173,7 +200,6 @@ export async function POST(request: Request) {
 `);
 	}
 
-	// multiple matches → menu
 	if (matches.length > 1) {
 		const top = matches.slice(0, 3);
 		const phones = top.map((c: any) => c.phone_number).join(",");
@@ -198,7 +224,43 @@ export async function POST(request: Request) {
 `);
 	}
 
-	// no match
+	// ───────────── SUGGESTIONS (🔥 NEW) ─────────────
+	const normalizedQuery = normalize(query);
+
+	const scored = contactRows
+		.map((c: any) => ({
+			contact: c,
+			score: similarity(normalize(c.name), normalizedQuery),
+		}))
+		.filter((x) => x.score > 0.6)
+		.sort((a, b) => b.score - a.score)
+		.slice(0, 3);
+
+	if (scored.length > 0) {
+		const top = scored.map((s) => s.contact);
+		const phones = top.map((c: any) => c.phone_number).join(",");
+
+		const menuAction = `${baseUrl}/api/twilio/voice/collect?choicePhones=${encodeURIComponent(phones)}`;
+
+		const options = top
+			.map((c: any, i: number) => `Press ${i + 1} for ${escape(c.name)}`)
+			.join(". ");
+
+		return xml(`
+<Response>
+	<Gather input="dtmf speech"
+			numDigits="1"
+			timeout="7"
+			action="${menuAction}"
+			method="POST"
+			actionOnEmptyResult="true">
+		<Say>I couldn't find ${escape(query)}. Did you mean: ${options}</Say>
+	</Gather>
+</Response>
+`);
+	}
+
+	// fallback retry
 	if (retryCount < 2) {
 		const retryAction = `${baseUrl}/api/twilio/voice/collect?retry=${retryCount + 1}`;
 
