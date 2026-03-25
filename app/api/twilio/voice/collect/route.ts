@@ -106,7 +106,8 @@ function similarityRatio(a: string, b: string): number {
 }
 
 export async function POST(request: Request) {
-	const requestUrl = new URL(request.url);
+  try {
+    const requestUrl = new URL(request.url);
 	const retryCount = Number(requestUrl.searchParams.get("retry") ?? "0") || 0;
 	const candidatePhonesParam =
 		requestUrl.searchParams.get("candidatePhones") ?? "";
@@ -535,4 +536,10 @@ export async function POST(request: Request) {
 	}
 
 	return dialContact(match);
+  } catch (error) {
+    console.error("[twilio/voice/collect] unhandled error", error);
+    return xml(
+      `<Response><Say>Sorry, we hit a server issue. Please try again later.</Say><Hangup/></Response>`
+    );
+  }
 }
